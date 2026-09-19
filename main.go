@@ -736,7 +736,8 @@ func drawTopPanel(hdc HDC, rc RECT) {
 	for y := top.Top + 1; y < top.Bottom-1; y += 4 { line(hdc, top.Left+1, y, top.Right-2, y, penPanelAccent) }
 	frame(hdc, top, brushBlack); drawInsetFrame(hdc, top)
 	leftR, rightR := meterRects(mainHwnd)
-	drawMeter(hdc, leftR, leftMeter, "LEFT"); drawMeter(hdc, rightR, rightMeter, "RIGHT")
+	analyzerR := RECT{leftR.Left, leftR.Top, rightR.Right, rightR.Bottom}
+	drawSpectrumAnalyzer(hdc, analyzerR)
 
 	oldB, _, _ := pSelectObject.Call(uintptr(hdc), uintptr(brushLampOn))
 	oldP, _, _ := pSelectObject.Call(uintptr(hdc), uintptr(penLampGlow))
@@ -752,7 +753,7 @@ func drawTopPanel(hdc HDC, rc RECT) {
 	status := "READY"; if playing { if paused { status = "PAUSED" } else { status = "PLAYING" } }
 	drawText(hdc, fmt.Sprintf("%s    %s  /  %s", status, formatTime(trackPosMs), formatTime(trackLengthMs)), RECT{136, 222, rc.Right - 36, 242}, DT_CENTER|DT_VCENTER|DT_SINGLELINE, color(127, 224, 117), appFont)
 	drawText(hdc, "NETWORK AUDIO", RECT{26, 234, 110, 252}, DT_LEFT|DT_SINGLELINE, color(175, 159, 118), tinyFont)
-	drawText(hdc, "REMOTE AUDIO DECK  •  v0.2.6", RECT{rc.Right / 2, 252, rc.Right - 26, 270}, DT_RIGHT|DT_SINGLELINE, color(125, 128, 119), tinyFont)
+	drawText(hdc, "REMOTE AUDIO DECK  •  v0.2.7", RECT{rc.Right / 2, 252, rc.Right - 26, 270}, DT_RIGHT|DT_SINGLELINE, color(125, 128, 119), tinyFont)
 }
 func paintMain(hwnd HWND) {
 	var ps PAINTSTRUCT
@@ -845,7 +846,7 @@ func layout(hwnd HWND) {
 func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case WM_CREATE:
-		mainHwnd = HWND(hwnd); initAudioMeter()
+		mainHwnd = HWND(hwnd); initAudioMeter(); startSpectrumAnalyzer()
 		pathEdit = createWindow(0, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, 0, 0, 0, 0, mainHwnd, ID_PATH)
 		btnBrowse = createWindow(0, "BUTTON", "BROWSE", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0, 0, 0, 0, mainHwnd, ID_BROWSE)
 		btnGo = createWindow(0, "BUTTON", "GO", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0, 0, 0, 0, mainHwnd, ID_GO)
@@ -913,13 +914,12 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		}
 	case WM_TIMER:
 		if wParam == TIMER_UI {
-			l, r := readMeter()
-			leftMeter, leftMeterVelocity = stepNeedle(leftMeter, leftMeterVelocity, meterMap(l))
-			rightMeter, rightMeterVelocity = stepNeedle(rightMeter, rightMeterVelocity, meterMap(r))
 			timerTicks++
-			leftR, rightR := meterRects(HWND(hwnd))
-			pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&leftR)), 0)
-			pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&rightR)), 0)
+			if timerTicks%2 == 0 {
+				leftR, rightR := meterRects(HWND(hwnd))
+				analyzerR := RECT{leftR.Left, leftR.Top, rightR.Right, rightR.Bottom}
+				pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&analyzerR)), 0)
+			}
 			if timerTicks%20 == 0 {
 				if playing {
 					trackPosMs = queryMCIInt("status smbplayer position")
@@ -939,7 +939,7 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	case MM_MCINOTIFY:
 		if wParam == MCI_NOTIFY_SUCCESSFUL && playing && !paused { nextTrack(1) }; return 0
 	case WM_DESTROY:
-		pKillTimer.Call(hwnd, TIMER_UI); mciNoResult("close smbplayer"); if meterInfo != nil { comRelease(meterInfo); meterInfo = nil }; pCoUninitialize.Call(); pPostQuitMessage.Call(0); return 0
+		pKillTimer.Call(hwnd, TIMER_UI); stopSpectrumAnalyzer(); mciNoResult("close smbplayer"); if meterInfo != nil { comRelease(meterInfo); meterInfo = nil }; pCoUninitialize.Call(); pPostQuitMessage.Call(0); return 0
 	}
 	r, _, _ := pDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam); return r
 }
@@ -980,10 +980,10 @@ func main() {
 	} else {
 		ico = must1(pLoadIconW.Call(0, IDI_APPLICATION))
 	}
-	className := wstr("SMBPlayerPC_V026")
+	className := wstr("SMBPlayerPC_V027")
 	wc := WNDCLASSEX{CbSize: uint32(unsafe.Sizeof(WNDCLASSEX{})), Style: 0x0003, LpfnWndProc: syscall.NewCallback(wndProc), HInstance: hInst, HIcon: ico, HCursor: cur, HbrBackground: brushDark, LpszClassName: className, HIconSm: ico}
 	if r := must1(pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))); r == 0 { return }
-	hwnd := createWindow(0, "SMBPlayerPC_V026", "SMB Player PC v0.2.6", WS_OVERLAPPEDWINDOW, -2147483648, -2147483648, 980, 720, 0, 0)
+	hwnd := createWindow(0, "SMBPlayerPC_V027", "SMB Player PC v0.2.7", WS_OVERLAPPEDWINDOW, -2147483648, -2147483648, 980, 720, 0, 0)
 	if hwnd == 0 { return }
 	pSendMessageW.Call(uintptr(hwnd), WM_SETICON, ICON_BIG, ico)
 	pSendMessageW.Call(uintptr(hwnd), WM_SETICON, ICON_SMALL, ico)
