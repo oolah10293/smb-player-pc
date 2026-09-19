@@ -6,7 +6,7 @@ SMB Player PC uses the normal Windows filesystem. It does **not** implement SMB 
 
 ## Current version
 
-**v0.2.6**
+**v0.2.7**
 
 Current working features:
 
@@ -22,34 +22,42 @@ Current working features:
 - A-Z, Z-A, New-to-Old, and Old-to-New sorting
 - Last-folder memory
 - Async folder enumeration so slow/dead network paths do not freeze the UI
-- Vintage receiver-style interface
-- Dual analog VU meters driven by the actual Windows output-channel levels
-- Double-buffered meter rendering to prevent flicker
-- Backlit meter styling, fluorescent-style track/status display, power lamp, and labeled SEEK/VOLUME controls
+- Dark stereo-component-inspired interface
+- Wide 31-band segmented spectrum analyzer
+- Real analyzer data from Windows WASAPI shared-mode endpoint loopback capture
+- 4096-point FFT with logarithmically spaced frequency bands from roughly 35 Hz to 16 kHz
+- Common slow display AGC so the analyzer stays visually active without changing the audio
+- Fast bar response with short peak-hold markers
+- Green / amber / red LED-style segments
+- Analyzer is effectively independent of the player's volume setting until mute, which is desirable for the visual display
+- Existing VU-style application icon retained as an homage to the original analog-meter versions
 
-## Current known regression
+## Playback / network status
 
-**v0.2.4 can browse network music folders but currently fails to open the remote files for playback.**
+Current playback is still handled by Windows MCI. The v0.2.7 spectrum analyzer is a **separate visualization branch** and does not replace or modify the playback backend.
 
-Observed behavior:
-
-- Remote folders and MP3 files enumerate correctly.
-- **Play Folder** on the remote location reports `CAN'T OPEN` essentially immediately.
-- Double-clicking a single remote MP3 and waiting still reports `CAN'T OPEN` after roughly 3–5 seconds.
-- A local Desktop copy of `My Name Is.mp3` plays successfully.
-- **v0.1.2 is the known-good remote-playback baseline:** it successfully played a song from a hard drive at one house on a PC roughly three hours away.
-
-That makes this a playback/open regression rather than a basic network-directory-access failure. See the open GitHub issue for the test record.
+Remote/network playback has been confirmed working again. The earlier v0.2.4 failure was not reproduced later, and VLC also showed buffering during the same degraded network conditions, so that incident is retained as historical evidence rather than treated as an active player regression.
 
 ## Design direction
 
-The interface is intentionally moving toward a **late-1970s / early-1980s stereo receiver** rather than a modern streaming-app design. Album art is not a priority; the animated VU meters are intended to be the visual centerpiece.
+The analyzer is now the visual centerpiece.
 
-The next visual work is focused on making the meters and controls feel like actual hardware: correct proportions, convincing backlighting, more physical bezels/controls, and stronger stereo-component personality without sacrificing the practical file browser.
+The goal is **visually interesting without being visually annoying**:
+- movement should clearly correlate with the music
+- different frequency regions should move independently
+- the display should stay usefully occupied across quiet and loud material
+- literal meter calibration is not important
+- playback audio must remain untouched
+
+The current implementation listens to the default Windows render endpoint, so other computer audio intentionally appears on the analyzer too.
+
+The VU-style app icon stays.
 
 ## Build
 
-The project is written in Go using the native Windows API. No external Go packages are currently required.
+The project is written in Go using the native Windows API plus:
+- `github.com/degubites/go-wca` for WASAPI/Core Audio access
+- `github.com/go-ole/go-ole` for COM support
 
 To cross-compile from a machine with Go installed:
 
