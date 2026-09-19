@@ -6,7 +6,7 @@ SMB Player PC uses the normal Windows filesystem. It does **not** implement SMB 
 
 ## Current version
 
-**v0.2.4**
+**v0.2.6**
 
 Current working features:
 
