@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.6
+
+- Reworked VU needle motion for **fast but continuous** analog-style travel.
+- Increased meter update cadence from 25 Hz to approximately 100 Hz with 1 ms Windows timer resolution requested.
+- Replaced heavy smoothing with a lightly damped spring model so the needle visibly traverses intermediate positions instead of appearing to jump.
+- Expanded the middle of the display response so typical mastered music produces more visible needle travel.
+- Corrected VU scale proportions and kept LEFT/RIGHT/VU markings clear of the pivot.
+- Moved SEEK and VOLUME captions into a dedicated bottom control strip and centered them over their controls.
+- Preserved the VU-style application icon.
+- Playback/network code intentionally unchanged.
+
+
 ## v0.2.4 — current
 
 - Continued vintage receiver/stereo visual redesign.
