@@ -34,9 +34,22 @@ Current working features:
 
 ## Playback / network status
 
-Current playback is still handled by Windows MCI. The v0.2.7 spectrum analyzer is a **separate visualization branch** and does not replace or modify the playback backend.
+v0.2.7 still uses Windows MCI for playback. The spectrum analyzer is a **separate visualization branch** and does not replace or modify the playback backend.
 
-Remote/network playback has been confirmed working again. The earlier v0.2.4 failure was not reproduced later, and VLC also showed buffering during the same degraded network conditions, so that incident is retained as historical evidence rather than treated as an active player regression.
+Remote/network playback itself has been confirmed working again. However, MCI has now exposed a more serious local-file compatibility problem: some otherwise valid MP3 files are rejected with `CAN'T OPEN`.
+
+A controlled test isolated one reproducible case:
+
+- Original `The Raconteurs - Level.mp3`: fails every time in SMB Player.
+- Copying that original file to the local Desktop does **not** fix it, ruling out SMB/network access.
+- The original file had a roughly 195 KB ID3 block dominated by embedded album art.
+- A test copy with only the embedded cover-art frame removed had a roughly 4 KB ID3 block.
+- The MP3 audio payload of the original and stripped test copy was byte-for-byte identical.
+- The stripped test copy played successfully.
+
+In spot testing the same folder, roughly half the sampled MP3 files opened and roughly half returned `CAN'T OPEN`, with failures reproducible by file. This makes MCI playback compatibility a release-blocking reliability problem rather than an isolated bad track.
+
+**Decision:** v0.2.7 is the last planned MCI-based build. The next backend should use a modern Windows playback path while preserving the existing browser, network-path behavior, UI, and WASAPI analyzer.
 
 ## Design direction
 
