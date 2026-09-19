@@ -63,6 +63,12 @@ type DRAWITEMSTRUCT struct {
 	ItemData                                      uintptr
 }
 type INITCOMMONCONTROLSEX struct{ DwSize, DwICC uint32 }
+type ICONINFO struct {
+	FIcon               int32
+	XHotspot, YHotspot uint32
+	Pad                 uint32
+	HbmMask, HbmColor  uintptr
+}
 type GUID struct {
 	Data1        uint32
 	Data2, Data3 uint16
@@ -114,6 +120,9 @@ const (
 	WM_TIMER                 = 0x0113
 	WM_HSCROLL               = 0x0114
 	WM_DRAWITEM              = 0x002B
+	WM_SETICON               = 0x0080
+	ICON_SMALL               = 0
+	ICON_BIG                 = 1
 	WM_CTLCOLORSTATIC        = 0x0138
 	WM_CTLCOLOREDIT          = 0x0133
 	WM_CTLCOLORLISTBOX       = 0x0134
@@ -203,6 +212,10 @@ var (
 	pFillRect             = user32.NewProc("FillRect")
 	pFrameRect            = user32.NewProc("FrameRect")
 	pDrawTextW            = user32.NewProc("DrawTextW")
+	pGetDC                = user32.NewProc("GetDC")
+	pReleaseDC            = user32.NewProc("ReleaseDC")
+	pCreateIconIndirect   = user32.NewProc("CreateIconIndirect")
+	pDestroyIcon          = user32.NewProc("DestroyIcon")
 
 	pSetBkColor             = gdi32.NewProc("SetBkColor")
 	pSetTextColor           = gdi32.NewProc("SetTextColor")
@@ -220,9 +233,12 @@ var (
 	pRectangle              = gdi32.NewProc("Rectangle")
 	pEllipse                = gdi32.NewProc("Ellipse")
 	pCreateFontW            = gdi32.NewProc("CreateFontW")
+	pCreateBitmap           = gdi32.NewProc("CreateBitmap")
 
 	pGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
 	pMciSendStringW       = winmm.NewProc("mciSendStringW")
+	pTimeBeginPeriod      = winmm.NewProc("timeBeginPeriod")
+	pTimeEndPeriod        = winmm.NewProc("timeEndPeriod")
 	pCoInitializeEx       = ole32.NewProc("CoInitializeEx")
 	pCoUninitialize       = ole32.NewProc("CoUninitialize")
 	pCoCreateInstance     = ole32.NewProc("CoCreateInstance")
@@ -238,7 +254,7 @@ var (
 	hInstance                                                                                                                uintptr
 	appFont, displayFont, meterFont, tinyFont                                                                                HFONT
 	brushDark, brushPanel, brushEdit, brushButton, brushButtonDown, brushCream, brushBlack, brushDisplay, brushLampOn        HBRUSH
-	penBlack, penRed, penScale, penBevelLight, penBevelDark, penMeterLight, penPanelAccent, penLampGlow                     HPEN
+	penBlack, penRed, penScale, penBevelLight, penBevelDark, penMeterLight, penMeterGlow, penPanelAccent, penLampGlow       HPEN
 	currentEntries                                                                                                           []Entry
 	currentDir                                                                                                               string
 	sortMode                                                                                                                 int
@@ -249,6 +265,9 @@ var (
 	trackLengthMs, trackPosMs                                                                                                int
 	volume                                                                                                                   = 780
 	leftMeter, rightMeter                                                                                                    float64
+	leftMeterVelocity, rightMeterVelocity                                                                                    float64
+	appIcon                                                                                                                   uintptr
+	appIconOwned                                                                                                              bool
 	meterInfo                                                                                                                *COMObject
 	browseMu                                                                                                                 sync.Mutex
 	browseResult                                                                                                             BrowseResult
@@ -334,12 +353,36 @@ func meterMap(v float64) float64 {
 	db := 20 * math.Log10(v)
 	if db < -36 { db = -36 }
 	if db > 0 { db = 0 }
-	return (db + 36) / 36
+
+	// Keep the scale recognizably VU-like, but deliberately expand the
+	// middle of the range so modern compressed music still produces
+	// visible needle travel instead of parking around one spot.
+	f := (db + 36) / 36
+	f = 0.5 + (f-0.5)*1.45
+	if f < 0 { f = 0 }
+	if f > 1 { f = 1 }
+	return f
 }
-func smooth(old, target float64) float64 {
-	alpha := 0.58
-	if target < old { alpha = 0.17 }
-	return old + (target-old)*alpha
+
+func stepNeedle(pos, velocity, target float64) (float64, float64) {
+	// Fast, lightly damped second-order motion. The needle is allowed to
+	// move quickly; the goal is continuous physical-looking travel rather
+	// than slow averaging or frame-to-frame teleporting.
+	const dt = 0.010
+	const spring = 1600.0
+	const damping = 50.0
+	accel := spring*(target-pos) - damping*velocity
+	velocity += accel * dt
+	pos += velocity * dt
+	if pos < 0 {
+		pos = 0
+		if velocity < 0 { velocity = 0 }
+	}
+	if pos > 1 {
+		pos = 1
+		if velocity > 0 { velocity = 0 }
+	}
+	return pos, velocity
 }
 
 func mci(cmd string, wantResult bool) (string, error) {
@@ -560,6 +603,45 @@ func drawRaisedFrame(hdc HDC, r RECT, pressed bool) {
 	line(hdc, r.Left, r.Bottom-1, r.Right-1, r.Bottom-1, bottomRight)
 	line(hdc, r.Right-1, r.Top, r.Right-1, r.Bottom-1, bottomRight)
 }
+
+func makeAppIcon() uintptr {
+	screenR, _, _ := pGetDC.Call(0)
+	if screenR == 0 { return 0 }
+	defer pReleaseDC.Call(0, screenR)
+
+	memR, _, _ := pCreateCompatibleDC.Call(screenR)
+	if memR == 0 { return 0 }
+	defer pDeleteDC.Call(memR)
+	mem := HDC(memR)
+
+	bmpR, _, _ := pCreateCompatibleBitmap.Call(screenR, 32, 32)
+	if bmpR == 0 { return 0 }
+	old, _, _ := pSelectObject.Call(memR, bmpR)
+
+	fill(mem, RECT{0, 0, 32, 32}, brushBlack)
+	fill(mem, RECT{2, 3, 30, 29}, brushPanel)
+	fill(mem, RECT{5, 6, 27, 25}, brushCream)
+	line(mem, 7, 9, 25, 9, penMeterLight)
+	line(mem, 8, 18, 24, 18, penScale)
+	line(mem, 16, 23, 23, 12, penRed)
+	oldB, _, _ := pSelectObject.Call(memR, uintptr(brushBlack))
+	oldP, _, _ := pSelectObject.Call(memR, uintptr(penBlack))
+	pEllipse.Call(memR, 14, 21, 18, 25)
+	pSelectObject.Call(memR, oldP)
+	pSelectObject.Call(memR, oldB)
+
+	pSelectObject.Call(memR, old)
+	maskR, _, _ := pCreateBitmap.Call(32, 32, 1, 1, 0)
+	if maskR == 0 {
+		pDeleteObject.Call(bmpR)
+		return 0
+	}
+	ii := ICONINFO{FIcon: 1, HbmMask: maskR, HbmColor: bmpR}
+	ico, _, _ := pCreateIconIndirect.Call(uintptr(unsafe.Pointer(&ii)))
+	pDeleteObject.Call(maskR)
+	pDeleteObject.Call(bmpR)
+	return ico
+}
 func drawMeter(hdc HDC, r RECT, level float64, label string) {
 	fill(hdc, r, brushBlack)
 	bezel := RECT{r.Left + 2, r.Top + 2, r.Right - 2, r.Bottom - 2}
@@ -569,24 +651,23 @@ func drawMeter(hdc HDC, r RECT, level float64, label string) {
 	fill(hdc, face, brushCream)
 	drawInsetFrame(hdc, face)
 
-	for i := face.Top + 2; i < face.Bottom-2; i += 4 {
-		p := HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(236, 228, 196))))
-		line(hdc, face.Left+2, i, face.Right-3, i, p)
-		pDeleteObject.Call(uintptr(p))
+	// Warm backlight texture; use persistent pens so high-rate animation
+	// does not constantly create/delete GDI objects.
+	for i := face.Top + 3; i < face.Bottom-3; i += 4 {
+		line(hdc, face.Left+3, i, face.Right-4, i, penMeterGlow)
 	}
-	glass := HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(255, 250, 230))))
-	line(hdc, face.Left+18, face.Top+14, face.Right-22, face.Top+14, glass)
-	line(hdc, face.Left+24, face.Top+18, face.Right-34, face.Top+18, glass)
-	pDeleteObject.Call(uintptr(glass))
+	line(hdc, face.Left+18, face.Top+14, face.Right-22, face.Top+14, penMeterLight)
+	line(hdc, face.Left+24, face.Top+18, face.Right-34, face.Top+18, penMeterLight)
 
 	cx := (face.Left + face.Right) / 2
-	cy := face.Bottom - 22
+	cy := face.Bottom - 18
 	h := float64(face.Bottom - face.Top)
-	outer := math.Min(float64(face.Right-face.Left)*0.31, h*0.72)
-	needleR := outer - 16
+	outer := math.Min(float64(face.Right-face.Left)*0.28, h*0.62)
+	needleR := outer - 10
+
 	var px, py int32
-	for i := 0; i <= 72; i++ {
-		f := float64(i) / 72
+	for i := 0; i <= 80; i++ {
+		f := float64(i) / 80
 		x, y := meterPoint(cx, cy, outer, f)
 		if i > 0 { line(hdc, px, py, x, y, penScale) }
 		px, py = x, y
@@ -602,13 +683,18 @@ func drawMeter(hdc HDC, r RECT, level float64, label string) {
 		x2, y2 := meterPoint(cx, cy, outer-length, f)
 		line(hdc, x1, y1, x2, y2, p)
 	}
-	major := []struct{ db int; frac float64 }{{-36, 0}, {-20, .36}, {-10, .64}, {-5, .79}, {-3, .87}, {0, 1}}
+
+	major := []struct{ db int; frac float64 }{
+		{-36, 0.00}, {-20, 0.34}, {-10, 0.60}, {-5, 0.76}, {-3, 0.85}, {0, 1.00},
+	}
 	for _, m := range major {
-		x, y := meterPoint(cx, cy, outer+18, m.frac)
-		col := color(48, 42, 32); if m.db >= -3 { col = color(163, 45, 34) }
+		x, y := meterPoint(cx, cy, outer+17, m.frac)
+		col := color(48, 42, 32)
+		if m.db >= -3 { col = color(163, 45, 34) }
 		drawText(hdc, fmt.Sprintf("%d", m.db), RECT{x - 17, y - 8, x + 17, y + 10}, DT_CENTER|DT_SINGLELINE, col, meterFont)
 	}
 	drawText(hdc, "dB", RECT{cx - 24, face.Top + 8, cx + 24, face.Top + 24}, DT_CENTER|DT_SINGLELINE, color(112, 96, 60), tinyFont)
+
 	ang := meterAngle(level)
 	nx := int32(float64(cx) + math.Sin(ang)*needleR)
 	ny := int32(float64(cy) - math.Cos(ang)*needleR)
@@ -619,9 +705,12 @@ func drawMeter(hdc HDC, r RECT, level float64, label string) {
 	oldB, _, _ := pSelectObject.Call(uintptr(hdc), uintptr(brushBlack))
 	oldP, _, _ := pSelectObject.Call(uintptr(hdc), uintptr(penBlack))
 	pEllipse.Call(uintptr(hdc), uintptr(cx-6), uintptr(cy-6), uintptr(cx+7), uintptr(cy+7))
-	pSelectObject.Call(uintptr(hdc), oldP); pSelectObject.Call(uintptr(hdc), oldB)
-	drawText(hdc, label, RECT{face.Left + 10, face.Bottom - 28, face.Right - 10, face.Bottom - 14}, DT_CENTER|DT_SINGLELINE, color(64, 55, 40), appFont)
-	drawText(hdc, "VU", RECT{face.Left + 10, face.Bottom - 15, face.Right - 10, face.Bottom - 2}, DT_CENTER|DT_SINGLELINE, color(128, 104, 61), tinyFont)
+	pSelectObject.Call(uintptr(hdc), oldP)
+	pSelectObject.Call(uintptr(hdc), oldB)
+
+	// Keep these markings away from the pivot/needle sweep.
+	drawText(hdc, label, RECT{face.Left + 12, face.Bottom - 25, cx - 20, face.Bottom - 7}, DT_LEFT|DT_SINGLELINE, color(64, 55, 40), tinyFont)
+	drawText(hdc, "VU", RECT{cx + 20, face.Bottom - 25, face.Right - 12, face.Bottom - 7}, DT_RIGHT|DT_SINGLELINE, color(128, 104, 61), tinyFont)
 }
 func formatTime(ms int) string {
 	if ms < 0 { ms = 0 }
@@ -663,7 +752,7 @@ func drawTopPanel(hdc HDC, rc RECT) {
 	status := "READY"; if playing { if paused { status = "PAUSED" } else { status = "PLAYING" } }
 	drawText(hdc, fmt.Sprintf("%s    %s  /  %s", status, formatTime(trackPosMs), formatTime(trackLengthMs)), RECT{136, 222, rc.Right - 36, 242}, DT_CENTER|DT_VCENTER|DT_SINGLELINE, color(127, 224, 117), appFont)
 	drawText(hdc, "NETWORK AUDIO", RECT{26, 234, 110, 252}, DT_LEFT|DT_SINGLELINE, color(175, 159, 118), tinyFont)
-	drawText(hdc, "REMOTE AUDIO DECK  •  v0.2.4", RECT{rc.Right / 2, 252, rc.Right - 26, 270}, DT_RIGHT|DT_SINGLELINE, color(125, 128, 119), tinyFont)
+	drawText(hdc, "REMOTE AUDIO DECK  •  v0.2.6", RECT{rc.Right / 2, 252, rc.Right - 26, 270}, DT_RIGHT|DT_SINGLELINE, color(125, 128, 119), tinyFont)
 }
 func paintMain(hwnd HWND) {
 	var ps PAINTSTRUCT
@@ -672,53 +761,85 @@ func paintMain(hwnd HWND) {
 	var rc RECT
 	pGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rc)))
 	if ps.RcPaint.Top < panelTopHeight && rc.Right > 0 {
-		panelH := panelTopHeight; if rc.Bottom < panelH { panelH = rc.Bottom }
+		panelH := panelTopHeight
+		if rc.Bottom < panelH { panelH = rc.Bottom }
 		if panelH > 0 {
-			memR, _, _ := pCreateCompatibleDC.Call(uintptr(hdc)); if memR != 0 {
+			memR, _, _ := pCreateCompatibleDC.Call(uintptr(hdc))
+			if memR != 0 {
 				mem := HDC(memR)
-				bmpR, _, _ := pCreateCompatibleBitmap.Call(uintptr(hdc), uintptr(rc.Right), uintptr(panelH)); if bmpR != 0 {
+				bmpR, _, _ := pCreateCompatibleBitmap.Call(uintptr(hdc), uintptr(rc.Right), uintptr(panelH))
+				if bmpR != 0 {
 					old, _, _ := pSelectObject.Call(uintptr(mem), bmpR)
 					drawTopPanel(mem, rc)
 					pBitBlt.Call(uintptr(hdc), 0, 0, uintptr(rc.Right), uintptr(panelH), uintptr(mem), 0, 0, SRCCOPY)
-					pSelectObject.Call(uintptr(mem), old); pDeleteObject.Call(bmpR)
+					pSelectObject.Call(uintptr(mem), old)
+					pDeleteObject.Call(bmpR)
 				}
 				pDeleteDC.Call(uintptr(mem))
 			}
 		}
 	}
 	if ps.RcPaint.Bottom > panelTopHeight {
-		bottom := ps.RcPaint; if bottom.Top < panelTopHeight { bottom.Top = panelTopHeight }
+		bottom := ps.RcPaint
+		if bottom.Top < panelTopHeight { bottom.Top = panelTopHeight }
 		fill(hdc, bottom, brushDark)
+
 		w, h := rc.Right, rc.Bottom
-		margin := int32(12); by := h - 64; seekX := margin + 265; seekW := max32(120, w-seekX-170); volX := seekX + seekW + 10
-		drawText(hdc, "SEEK", RECT{seekX, by - 16, seekX + 80, by - 2}, DT_LEFT|DT_SINGLELINE, color(175, 159, 118), tinyFont)
-		drawText(hdc, "VOLUME", RECT{volX, by - 16, volX + 90, by - 2}, DT_LEFT|DT_SINGLELINE, color(175, 159, 118), tinyFont)
-		listY := int32(372); listBottom := by - 14
-		if listBottom > listY+20 { fr := RECT{margin - 2, listY - 2, w - margin + 2, listBottom + 2}; frame(hdc, fr, brushBlack); drawInsetFrame(hdc, fr) }
+		margin := int32(12)
+		controlY := h - 54
+		labelTop := controlY - 25
+		seekX := margin + 265
+		seekW := max32(120, w-seekX-170)
+		volX := seekX + seekW + 10
+		volW := int32(140)
+
+		drawText(hdc, "SEEK", RECT{seekX, labelTop, seekX + seekW, labelTop + 16}, DT_CENTER|DT_SINGLELINE, color(175, 159, 118), tinyFont)
+		drawText(hdc, "VOLUME", RECT{volX, labelTop, volX + volW, labelTop + 16}, DT_CENTER|DT_SINGLELINE, color(175, 159, 118), tinyFont)
+
+		listY := int32(372)
+		listBottom := labelTop - 10
+		if listBottom > listY+20 {
+			fr := RECT{margin - 2, listY - 2, w - margin + 2, listBottom + 2}
+			frame(hdc, fr, brushBlack)
+			drawInsetFrame(hdc, fr)
+		}
 	}
 	pEndPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
 }
 func layout(hwnd HWND) {
-	var rc RECT; pGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rc)))
-	w, h := rc.Right, rc.Bottom; margin := int32(12); y := int32(296); goW, browseW, gap := int32(68), int32(92), int32(6)
+	var rc RECT
+	pGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rc)))
+	w, h := rc.Right, rc.Bottom
+	margin := int32(12)
+	y := int32(296)
+	goW, browseW, gap := int32(68), int32(92), int32(6)
 	pathW := max32(180, w-2*margin-(goW+browseW+gap*2))
 	pMoveWindow.Call(uintptr(pathEdit), uintptr(margin), uintptr(y), uintptr(pathW), 28, 1)
 	bx := margin + pathW + gap
 	pMoveWindow.Call(uintptr(btnBrowse), uintptr(bx), uintptr(y), uintptr(browseW), 28, 1)
 	pMoveWindow.Call(uintptr(btnGo), uintptr(bx+browseW+gap), uintptr(y), uintptr(goW), 28, 1)
-	y = 332; bw := int32(118)
+
+	y = 332
+	bw := int32(118)
 	pMoveWindow.Call(uintptr(btnUp), uintptr(margin), uintptr(y), uintptr(bw), 30, 1)
 	pMoveWindow.Call(uintptr(btnPlayFolder), uintptr(margin+bw+8), uintptr(y), 150, 30, 1)
 	pMoveWindow.Call(uintptr(btnSort), uintptr(margin+bw+166), uintptr(y), 140, 30, 1)
-	listY := int32(372); bottom := int32(78); listH := h - listY - bottom; if listH < 80 { listH = 80 }
+
+	controlY := h - 54
+	labelTop := controlY - 25
+	listY := int32(372)
+	listBottom := labelTop - 10
+	listH := listBottom - listY
+	if listH < 80 { listH = 80 }
 	pMoveWindow.Call(uintptr(listBox), uintptr(margin), uintptr(listY), uintptr(w-2*margin), uintptr(listH), 1)
-	by := h - 64
-	pMoveWindow.Call(uintptr(btnPrev), uintptr(margin), uintptr(by), 74, 34, 1)
-	pMoveWindow.Call(uintptr(btnPlay), uintptr(margin+82), uintptr(by), 86, 34, 1)
-	pMoveWindow.Call(uintptr(btnNext), uintptr(margin+176), uintptr(by), 74, 34, 1)
-	seekX := margin + 265; seekW := max32(120, w-seekX-170)
-	pMoveWindow.Call(uintptr(seekBar), uintptr(seekX), uintptr(by+2), uintptr(seekW), 30, 1)
-	pMoveWindow.Call(uintptr(volBar), uintptr(seekX+seekW+10), uintptr(by+2), 140, 30, 1)
+
+	pMoveWindow.Call(uintptr(btnPrev), uintptr(margin), uintptr(controlY), 74, 34, 1)
+	pMoveWindow.Call(uintptr(btnPlay), uintptr(margin+82), uintptr(controlY), 86, 34, 1)
+	pMoveWindow.Call(uintptr(btnNext), uintptr(margin+176), uintptr(controlY), 74, 34, 1)
+	seekX := margin + 265
+	seekW := max32(120, w-seekX-170)
+	pMoveWindow.Call(uintptr(seekBar), uintptr(seekX), uintptr(controlY+2), uintptr(seekW), 30, 1)
+	pMoveWindow.Call(uintptr(volBar), uintptr(seekX+seekW+10), uintptr(controlY+2), 140, 30, 1)
 }
 
 func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
@@ -741,7 +862,7 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		pSetWindowTheme.Call(uintptr(seekBar), uintptr(unsafe.Pointer(wstr(""))), uintptr(unsafe.Pointer(wstr(""))))
 		pSetWindowTheme.Call(uintptr(volBar), uintptr(unsafe.Pointer(wstr(""))), uintptr(unsafe.Pointer(wstr(""))))
 		for _, c := range []HWND{pathEdit, listBox, btnGo, btnBrowse, btnUp, btnPlayFolder, btnSort, btnPrev, btnPlay, btnNext} { send(c, WM_SETFONT, uintptr(appFont), 1) }
-		pSetTimer.Call(hwnd, TIMER_UI, 40, 0)
+		pSetTimer.Call(hwnd, TIMER_UI, 10, 0)
 		if s := loadLastFolder(); s != "" { setText(pathEdit, s) } else if home, err := os.UserHomeDir(); err == nil { setText(pathEdit, home) }
 		layout(mainHwnd); return 0
 	case WM_SIZE:
@@ -792,9 +913,21 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		}
 	case WM_TIMER:
 		if wParam == TIMER_UI {
-			l, r := readMeter(); leftMeter = smooth(leftMeter, meterMap(l)); rightMeter = smooth(rightMeter, meterMap(r)); timerTicks++
-			leftR, rightR := meterRects(HWND(hwnd)); pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&leftR)), 0); pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&rightR)), 0)
-			if timerTicks%5 == 0 { if playing { trackPosMs = queryMCIInt("status smbplayer position"); if trackLengthMs > 0 { send(seekBar, TBM_SETPOS, 1, uintptr(trackPosMs*1000/trackLengthMs)) } }; statusR := RECT{20, 188, 10000, 248}; pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&statusR)), 0) }
+			l, r := readMeter()
+			leftMeter, leftMeterVelocity = stepNeedle(leftMeter, leftMeterVelocity, meterMap(l))
+			rightMeter, rightMeterVelocity = stepNeedle(rightMeter, rightMeterVelocity, meterMap(r))
+			timerTicks++
+			leftR, rightR := meterRects(HWND(hwnd))
+			pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&leftR)), 0)
+			pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&rightR)), 0)
+			if timerTicks%20 == 0 {
+				if playing {
+					trackPosMs = queryMCIInt("status smbplayer position")
+					if trackLengthMs > 0 { send(seekBar, TBM_SETPOS, 1, uintptr(trackPosMs*1000/trackLengthMs)) }
+				}
+				statusR := RECT{20, 188, 10000, 248}
+				pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&statusR)), 0)
+			}
 		}
 		return 0
 	case WM_BROWSE_DONE:
@@ -813,6 +946,8 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 func main() {
 	runtime.LockOSThread()
+	pTimeBeginPeriod.Call(1)
+	defer pTimeEndPeriod.Call(1)
 	icc := INITCOMMONCONTROLSEX{uint32(unsafe.Sizeof(INITCOMMONCONTROLSEX{})), ICC_BAR_CLASSES}; pInitCommonControlsEx.Call(uintptr(unsafe.Pointer(&icc)))
 	brushDark = HBRUSH(must1(pCreateSolidBrush.Call(color(14, 16, 16))))
 	brushPanel = HBRUSH(must1(pCreateSolidBrush.Call(color(37, 39, 38))))
@@ -829,6 +964,7 @@ func main() {
 	penBevelLight = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(92, 95, 88))))
 	penBevelDark = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(15, 16, 15))))
 	penMeterLight = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(250, 243, 215))))
+	penMeterGlow = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(236, 228, 196))))
 	penPanelAccent = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(46, 49, 47))))
 	penLampGlow = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(178, 255, 152))))
 	appFont = HFONT(must1(pCreateFontW.Call(17, 0, 0, 0, FW_NORMAL, 0, 0, 0, 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(wstr("Segoe UI"))))))
@@ -836,14 +972,24 @@ func main() {
 	meterFont = HFONT(must1(pCreateFontW.Call(15, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(wstr("Segoe UI"))))))
 	tinyFont = HFONT(must1(pCreateFontW.Call(12, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(wstr("Segoe UI"))))))
 	hInst := must1(pGetModuleHandleW.Call(0)); hInstance = hInst
-	cur := must1(pLoadCursorW.Call(0, IDC_ARROW)); ico := must1(pLoadIconW.Call(0, IDI_APPLICATION))
-	className := wstr("SMBPlayerPC_V024")
+	cur := must1(pLoadCursorW.Call(0, IDC_ARROW))
+	ico := makeAppIcon()
+	if ico != 0 {
+		appIcon = ico
+		appIconOwned = true
+	} else {
+		ico = must1(pLoadIconW.Call(0, IDI_APPLICATION))
+	}
+	className := wstr("SMBPlayerPC_V026")
 	wc := WNDCLASSEX{CbSize: uint32(unsafe.Sizeof(WNDCLASSEX{})), Style: 0x0003, LpfnWndProc: syscall.NewCallback(wndProc), HInstance: hInst, HIcon: ico, HCursor: cur, HbrBackground: brushDark, LpszClassName: className, HIconSm: ico}
 	if r := must1(pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))); r == 0 { return }
-	hwnd := createWindow(0, "SMBPlayerPC_V024", "SMB Player PC v0.2.4", WS_OVERLAPPEDWINDOW, -2147483648, -2147483648, 980, 720, 0, 0)
+	hwnd := createWindow(0, "SMBPlayerPC_V026", "SMB Player PC v0.2.6", WS_OVERLAPPEDWINDOW, -2147483648, -2147483648, 980, 720, 0, 0)
 	if hwnd == 0 { return }
+	pSendMessageW.Call(uintptr(hwnd), WM_SETICON, ICON_BIG, ico)
+	pSendMessageW.Call(uintptr(hwnd), WM_SETICON, ICON_SMALL, ico)
 	pShowWindow.Call(uintptr(hwnd), SW_SHOW); pUpdateWindow.Call(uintptr(hwnd))
 	var msg MSG
 	for { r, _, _ := pGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0); if int32(r) <= 0 { break }; pTranslateMessage.Call(uintptr(unsafe.Pointer(&msg))); pDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg))) }
+	if appIconOwned && appIcon != 0 { pDestroyIcon.Call(appIcon) }
 }
 func must1(r uintptr, _ uintptr, _ error) uintptr { return r }
