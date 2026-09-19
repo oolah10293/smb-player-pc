@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.7
+
+- Replaced the dual analog VU meters with one wide **31-band segmented spectrum analyzer**.
+- Preserved the existing Windows MCI playback path; the analyzer is a separate visualization branch.
+- Added WASAPI shared-mode endpoint loopback capture of the default Windows render device.
+- Analyzer intentionally responds to all audio on that Windows output device, not only SMB Player.
+- Added a 4096-point FFT and logarithmically spaced bands covering roughly 35 Hz to 16 kHz.
+- Added 16 LED-style segments per band with green, amber, and red regions.
+- Added fast bar response and short peak-hold markers.
+- Added one common slow display AGC so the spectrum stays visually useful across quiet and loud material without altering the playback audio or independently normalizing each band.
+- Runtime test confirmed the spectrum is genuinely frequency-dependent and visually tracks the music.
+- Runtime test also confirmed the analyzer is effectively unaffected by the SMB Player volume control until mute, which is desirable for this display.
+- Retained the existing VU-style application icon as an homage to the original meter design.
+- Network/playback behavior otherwise intentionally unchanged.
+
 ## v0.2.6
 
 - Reworked VU needle motion for **fast but continuous** analog-style travel.
@@ -11,8 +26,14 @@
 - Preserved the VU-style application icon.
 - Playback/network code intentionally unchanged.
 
+## v0.2.5
 
-## v0.2.4 — current
+- Further meter styling and UI polish.
+- Added the custom VU-style application icon.
+- Confirmed network playback working on a different computer/network-drive setup.
+- Identified that smooth VU movement still needed more responsive continuous travel.
+
+## v0.2.4
 
 - Continued vintage receiver/stereo visual redesign.
 - Reworked VU meters toward more realistic proportions.
@@ -20,7 +41,7 @@
 - Added POWER indicator lamp.
 - Added visible SEEK and VOLUME labels.
 - Added more faceplate/detail treatment around the controls and file-list area.
-- **Known regression discovered:** remote/network files enumerate but fail to open for playback.
+- A remote-playback failure was observed during a degraded network session; later testing did not reproduce it and VLC also buffered on the same network path.
 
 ## v0.2.3
 
