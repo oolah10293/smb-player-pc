@@ -1025,10 +1025,13 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			setText(btnPlay, "PAUSE")
 			pInvalidateRect.Call(hwnd, 0, 1)
 		case MF_MEDIA_ENGINE_EVENT_PAUSE:
-			if playing { paused = true; setText(btnPlay, "PLAY"); pInvalidateRect.Call(hwnd, 0, 1) }
+			// SetSource can generate state-change events while the next file is
+			// loading. Do not let those make the new track look manually paused.
+			if playing && !loading { paused = true; setText(btnPlay, "PLAY"); pInvalidateRect.Call(hwnd, 0, 1) }
 		case MF_MEDIA_ENGINE_EVENT_ENDED:
-			loading = false
-			if playing && !paused { nextTrack(1) }
+			// Likewise, ignore an old source's terminal event while a replacement
+			// source is still loading.
+			if !loading && playing && !paused { nextTrack(1) }
 		}
 		return 0
 	case WM_DESTROY:
