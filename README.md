@@ -6,9 +6,11 @@ SMB Player PC uses the normal Windows filesystem. It does **not** implement SMB 
 
 ## Current version
 
-**v0.2.7**
+**v0.3.0 — Media Foundation backend / Shuffle build**
 
-Current working features:
+The Windows executable builds successfully. Runtime validation of the new playback backend is the next step.
+
+Current features:
 
 - Folder-first browsing
 - Native Windows **Browse** folder picker
@@ -17,6 +19,7 @@ Current working features:
 - Double-click a track to start playback
 - Previous / Play-Pause / Next
 - Automatic next-track playback
+- **Shuffle ON/OFF**
 - Seek control
 - Volume control
 - A-Z, Z-A, New-to-Old, and Old-to-New sorting
@@ -26,41 +29,69 @@ Current working features:
 - Wide 31-band segmented spectrum analyzer
 - Real analyzer data from Windows WASAPI shared-mode endpoint loopback capture
 - 4096-point FFT with logarithmically spaced frequency bands from roughly 35 Hz to 16 kHz
-- Common slow display AGC so the analyzer stays visually active without changing the audio
+- Common slow display AGC
 - Fast bar response with short peak-hold markers
 - Green / amber / red LED-style segments
-- Analyzer is effectively independent of the player's volume setting until mute, which is desirable for the visual display
 - Existing VU-style application icon retained as an homage to the original analog-meter versions
 
-## Playback / network status
+## Playback backend
 
-v0.2.7 still uses Windows MCI for playback. The spectrum analyzer is a **separate visualization branch** and does not replace or modify the playback backend.
+v0.3.0 removes Windows MCI from the playback path and uses the Windows **Media Foundation Media Engine** (`IMFMediaEngine`) in audio-only mode.
 
-Remote/network playback itself has been confirmed working again. However, MCI has now exposed a more serious local-file compatibility problem: some otherwise valid MP3 files are rejected with `CAN'T OPEN`.
+The change was made after a controlled test showed that MCI could reject otherwise valid MP3 files because of their metadata/header layout. The key regression file is the original, unmodified `The Raconteurs - Level.mp3`: MCI rejected it even from the local Desktop, while an otherwise identical copy with only the large embedded artwork removed played normally.
 
-A controlled test isolated one reproducible case:
+The new Media Foundation backend owns:
 
-- Original `The Raconteurs - Level.mp3`: fails every time in SMB Player.
-- Copying that original file to the local Desktop does **not** fix it, ruling out SMB/network access.
-- The original file had a roughly 195 KB ID3 block dominated by embedded album art.
-- A test copy with only the embedded cover-art frame removed had a roughly 4 KB ID3 block.
-- The MP3 audio payload of the original and stripped test copy was byte-for-byte identical.
-- The stripped test copy played successfully.
+- open / play
+- pause / resume
+- seek
+- duration and position
+- volume / mute
+- end-of-track notification and auto-advance
 
-In spot testing the same folder, roughly half the sampled MP3 files opened and roughly half returned `CAN'T OPEN`, with failures reproducible by file. This makes MCI playback compatibility a release-blocking reliability problem rather than an isolated bad track.
+Local, mapped-drive, and UNC paths are converted to file URLs before being handed to Media Foundation.
 
-**Decision:** v0.2.7 is the last planned MCI-based build. The next backend should use a modern Windows playback path while preserving the existing browser, network-path behavior, UI, and WASAPI analyzer.
+The spectrum analyzer remains a separate WASAPI loopback path, so the visualizer was not rewritten as part of the backend change.
+
+### v0.3.0 runtime acceptance tests
+
+The build is complete, but these still need to be checked on a real Windows machine:
+
+- original unmodified `The Raconteurs - Level.mp3`
+- `The Red Jumpsuit Apparatus - Face Down.mp3`
+- local playback
+- mapped-drive / UNC playback
+- pause / resume
+- seek
+- volume
+- Previous / Next
+- end-of-track auto-advance
+- Shuffle
+- spectrum analyzer behavior
+
+The browser currently recognizes MP3, WAV, WMA, M4A, AAC, FLAC, and OGG. Actual decode support is intentionally not claimed until each format is runtime-tested through the new backend.
+
+## Shuffle behavior
+
+Shuffle preserves the core **folder = playlist** rule.
+
+- **SHUFFLE: OFF** uses the folder's current sort order.
+- **SHUFFLE: ON** chooses a random first track when Play Folder is pressed.
+- A shuffle cycle visits every track before starting a new randomized cycle.
+- The first track of a new cycle is prevented from immediately repeating the track that just played.
+- Previous walks backward through actual shuffle history.
+- After going backward, Next walks forward through that history before choosing a new shuffled track.
 
 ## Design direction
 
-The analyzer is now the visual centerpiece.
+The analyzer is the visual centerpiece.
 
 The goal is **visually interesting without being visually annoying**:
 - movement should clearly correlate with the music
 - different frequency regions should move independently
 - the display should stay usefully occupied across quiet and loud material
 - literal meter calibration is not important
-- playback audio must remain untouched
+- visualization processing must not alter playback audio
 
 The current implementation listens to the default Windows render endpoint, so other computer audio intentionally appears on the analyzer too.
 
@@ -71,6 +102,7 @@ The VU-style app icon stays.
 The project is written in Go using the native Windows API plus:
 - `github.com/degubites/go-wca` for WASAPI/Core Audio access
 - `github.com/go-ole/go-ole` for COM support
+- Windows Media Foundation system components for playback
 
 To cross-compile from a machine with Go installed:
 
@@ -84,7 +116,7 @@ On Windows PowerShell:
 go build -ldflags="-H windowsgui" -o SMBPlayerPC.exe .
 ```
 
-GitHub Actions also builds a Windows executable artifact on every push to `main` and on manual workflow dispatch.
+GitHub Actions builds a Windows executable artifact on every push to `main` and on manual workflow dispatch.
 
 ## Project philosophy
 
