@@ -270,8 +270,12 @@ func mediaOpen(path string) error {
 	if err := hresultError("IMFMediaEngine::SetSource", hr); err != nil {
 		return err
 	}
-	// Play can be requested before loading finishes. Media Engine completes
-	// the load asynchronously and reports PLAYING/ERROR through our callback.
+	// Microsoft documents SetSource as asynchronous and requires Load to
+	// start loading the selected URL. Play may be requested immediately;
+	// the Media Engine will start rendering when enough data is available.
+	if err := hresultError("IMFMediaEngine::Load", comCall(mediaEngine, 12)); err != nil {
+		return err
+	}
 	return mediaPlay()
 }
 
