@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.0
+
+- Replaced the Windows MCI playback backend with Windows Media Foundation **IMFMediaEngine** in audio-only mode.
+- Kept the existing browser, mapped-drive / UNC filesystem behavior, UI, and WASAPI spectrum analyzer separate from the playback-backend change.
+- Added explicit Media Foundation startup/shutdown and an IMFMediaEngineNotify callback that posts media events back to the Win32 window.
+- Added file-URL conversion for local, mapped-drive, and UNC media paths.
+- Added Media Engine playback, pause/resume, seek, duration/position, volume/mute, and end-of-track handling.
+- Added a visible LOADING state while a Media Engine source is being prepared.
+- Added **Shuffle** with an ON/OFF button.
+- Shuffle Play Folder starts at a random track, visits the folder without repeats within a cycle, avoids an immediate repeat across cycle boundaries, and preserves actual history for Previous/Next navigation.
+- Fixed failed-open UI state so stale elapsed/total time is cleared.
+- Fixed the previous behavior where PLAY after a failed open could restart playlist item 0.
+- Added guards against stale PAUSE/ENDED events while a replacement Media Engine source is still loading.
+- Preserved the v0.2.7 31-band spectrum analyzer and VU-style app icon.
+- GitHub Actions successfully builds the v0.3.0 64-bit Windows executable.
+- Runtime validation of the new backend is still required before the migration is considered complete.
+
 ## v0.2.7
 
 - Replaced the dual analog VU meters with one wide **31-band segmented spectrum analyzer**.
