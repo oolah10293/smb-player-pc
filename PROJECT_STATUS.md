@@ -1,113 +1,117 @@
-# Project Status — 2026-09-19
+# Project Status — 2026-09-20
 
 ## Current version
 
-**v0.2.7**
+**v0.3.0 — new playback-backend candidate**
 
-## What is confirmed working
+The source compiles successfully in GitHub Actions as a 64-bit Windows GUI executable. Runtime validation on Windows is still required before the Media Foundation migration is considered complete.
 
-- Application launches and remains responsive.
-- Native folder browsing works.
-- Local and remote/network folders enumerate correctly.
-- Remote/network playback has been confirmed working for files MCI can open.
-- Folder-as-playlist behavior works.
-- Transport controls, seek, volume, and auto-advance are implemented.
-- The Win32 GUI remains pinned to one OS thread to avoid the original freeze.
-- Directory/network enumeration remains asynchronous.
-- Startup does not automatically scan the remembered folder.
-- Wide 31-band spectrum analyzer is working from real Windows output audio.
-- Analyzer bands visibly respond differently across the frequency spectrum rather than acting like duplicated level meters.
-- WASAPI endpoint loopback captures the default Windows render mix, so other PC audio also appears by design.
-- Analyzer visual level is effectively independent of SMB Player's volume control until mute.
-- The analyzer uses common adaptive display gain so it stays visually active without altering the actual audio.
-- The existing VU-style app icon is retained intentionally as an homage to the original dual-meter design.
+## What remains preserved from v0.2.7
 
-## Newly confirmed playback blocker
+- Folder-first browser and folder-as-playlist model
+- Native Windows Browse folder picker
+- Manual mapped-drive / UNC path entry
+- Async directory/network enumeration
+- Last-folder memory
+- Existing transport layout
+- Current dark stereo-component visual direction
+- Wide 31-band WASAPI loopback spectrum analyzer
+- Current analyzer FFT / common display AGC behavior
+- Existing VU-style application icon
 
-MCI cannot be trusted to open all normal MP3 files in the user's collection.
+## Playback backend change
+
+The MCI playback path has been removed.
+
+v0.3.0 now uses Windows Media Foundation's **IMFMediaEngine** in audio-only mode. Media Foundation is started on the Win32 UI/COM thread, an IMFMediaEngineNotify callback posts playback events back to the application window, and local/mapped/UNC paths are converted to file URLs for SetSource.
+
+The backend now handles:
+- source open/load
+- play
+- pause/resume
+- seek
+- duration/position
+- volume/mute
+- end-of-track notification
+
+The existing WASAPI analyzer remains a separate endpoint-loopback path.
+
+## Why MCI was removed
+
+The decision came from a reproducible controlled test rather than a generic compatibility concern.
 
 Observed spot test:
-- clicking through tracks and giving each about five seconds produced roughly a 50/50 split between successful playback and `CAN'T OPEN`
-- failures were reproducible by file rather than random
+- roughly half of the sampled MP3s in one folder played
+- roughly half returned CAN'T OPEN
+- failures were reproducible by file
 - `The Red Jumpsuit Apparatus - Face Down.mp3` played every time
 - `The Raconteurs - Level.mp3` failed every time
 
 Controlled A/B test on `Level.mp3`:
-1. Original file failed from the music location.
-2. The same original file copied to the local Desktop still failed, ruling out SMB/network access.
-3. Original ID3 block was about 195,352 bytes, dominated by embedded PNG cover art.
-4. A test copy had only the embedded cover-art frame removed; its ID3 block dropped to about 4,160 bytes.
+1. Original failed from the normal music location.
+2. The same original copied to the local Desktop still failed, ruling out SMB/network access.
+3. Original ID3 block was about 195,352 bytes, dominated by embedded PNG artwork.
+4. A test copy had only the artwork frame removed; its ID3 block dropped to about 4,160 bytes.
 5. The MP3 audio payload remained byte-for-byte identical.
 6. The stripped copy played successfully.
 
-Conclusion: the playback failure is in MCI's handling of the MP3 container/tag/header data, not the MP3 audio payload and not the network path. The exact internal MCI limit has not been proven, so do not encode a guessed tag-size threshold as the fix.
+Conclusion: MCI was rejecting the MP3 because of container/tag/header handling, not because of the encoded audio or network path. No guessed tag-size threshold is used in the replacement.
 
-This is a deal breaker for a folder player: users must be able to trust that an ordinary MP3 in a folder will play without rewriting its tags.
+## Failure-path fixes included in v0.3.0
 
-## Backend decision
+- A real playback/open failure now resets elapsed and total time to 0:00 / 0:00.
+- The seek control is reset on failure.
+- PLAY after a failed open no longer blindly starts playlist item 0.
+- Media Engine source changes use a LOADING state.
+- Pause/end events generated while a replacement source is still loading are ignored so an old source cannot easily disturb the new selection.
 
-**v0.2.7 is the last planned MCI build.**
+## Shuffle added
 
-Next major task: replace MCI playback with a modern Windows playback backend, with Media Foundation as the current preferred direction.
+v0.3.0 adds a **SHUFFLE: OFF / SHUFFLE: ON** control.
 
-Do not redesign the rest of the application as part of the backend swap.
+Behavior:
+- Play Folder starts at a random track when Shuffle is ON.
+- Every track is visited once in the initial shuffle cycle.
+- Subsequent cycles are re-randomized.
+- A cycle boundary avoids an immediate repeat of the track that just played.
+- Previous follows actual shuffle history.
+- After going backward, Next follows forward history before taking a new shuffled choice.
+- With Shuffle OFF, normal sorted folder order is unchanged.
 
-Acceptance tests for the replacement backend:
-- original, unmodified `The Raconteurs - Level.mp3` plays
-- `The Red Jumpsuit Apparatus - Face Down.mp3` still plays
-- local playback works
-- mapped-drive / UNC playback works
-- Previous / Play-Pause / Next work
-- seek works
-- volume works
-- end-of-track auto-advance works
-- current WASAPI spectrum analyzer still works
-- application remains a simple Windows EXE without requiring a separate media-player installation
+## v0.3.0 runtime acceptance tests
 
-Also fix the current failure-path bugs during the swap:
-- failed open must reset stale elapsed/total time instead of leaving the previous track's values visible
-- PLAY after a failed open must not blindly resurrect playlist item 0
+Still to validate on Windows:
 
-## Current UI direction
+- [ ] Original unmodified `The Raconteurs - Level.mp3` plays.
+- [ ] `The Red Jumpsuit Apparatus - Face Down.mp3` still plays.
+- [ ] Local playback works.
+- [ ] Mapped-drive playback works.
+- [ ] UNC playback works.
+- [ ] Pause/resume works.
+- [ ] Seek works.
+- [ ] Volume/mute works.
+- [ ] Previous/Next work.
+- [ ] Track-end auto-advance works.
+- [ ] Shuffle works as intended.
+- [ ] Spectrum analyzer still works and remains visually correct.
+- [ ] Application remains responsive.
 
-The spectrum analyzer is now the preferred visual centerpiece over the dual analog VU meters.
+The file browser still recognizes MP3, WAV, WMA, M4A, AAC, FLAC, and OGG. Actual decode support through Media Foundation should be recorded only after runtime testing.
 
-Design goal: **visually interesting without offending**.
+## Next functional polish after backend validation
 
-That means:
-- motion must correlate with the actual song
-- bass/mid/treble regions should behave independently
-- the display should use a satisfying amount of its range
-- it should not sit pegged or dead
-- literal calibration is not important
-- no visualization processing may alter the playback audio
-
-The current 31-band / 16-segment green-amber-red analyzer is a successful first implementation and should be preserved while it is used for a while before unnecessary tuning.
-
-## Network-playback history
-
-A remote playback failure was observed in v0.2.4 while remote directories still enumerated normally. Later:
-- network playback worked again
-- no intentional playback/network-code change explained the recovery
-- VLC also buffered/chopped on the same remote path during the degraded session
-
-Therefore the v0.2.4 incident remains historical evidence and is distinct from the newly confirmed MCI/MP3 compatibility problem above.
-
-## Later requested functional tweaks
-
-After the backend replacement is stable:
-- Add Shuffle while preserving folder-as-playlist behavior.
-- Add embedded track metadata to the Now Playing area when practical.
-- Fall back cleanly to filename when metadata is missing.
-- Keep the current analyzer behavior unless runtime use exposes a specific problem.
+- Embedded title/artist metadata in the Now Playing area.
+- Clean filename fallback/recentering when metadata is absent.
+- Any analyzer adjustment only if actual use exposes a specific problem.
 
 ## Preserve
 
-- working folder browser and folder-as-playlist model
-- working mapped-drive / UNC behavior
-- native Browse button
+- folder = playlist
+- normal Windows local/mapped/UNC filesystem access
+- native Browse
 - manual path + GO
 - async folder enumeration
-- current dark stereo-component visual direction
-- current spectrum analyzer concept and behavior
+- current UI identity
+- current 31-band analyzer
 - VU-style app icon
+- single-EXE distribution
