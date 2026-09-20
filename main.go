@@ -5,11 +5,11 @@ package main
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -128,8 +128,6 @@ const (
 	WM_CTLCOLORLISTBOX       = 0x0134
 	WM_SETFONT               = 0x0030
 	WM_APP                   = 0x8000
-	MM_MCINOTIFY             = 0x03B9
-	MCI_NOTIFY_SUCCESSFUL    = 0x0001
 	LB_ADDSTRING             = 0x0180
 	LB_RESETCONTENT          = 0x0184
 	LB_GETCURSEL             = 0x0188
@@ -172,8 +170,10 @@ const (
 	ID_SEEK        = 1010
 	ID_VOL         = 1011
 	ID_BROWSE      = 1012
+	ID_SHUFFLE     = 1013
 	TIMER_UI       = 1
 	WM_BROWSE_DONE = WM_APP + 1
+	WM_MEDIA_EVENT = WM_APP + 2
 )
 
 var (
@@ -236,7 +236,6 @@ var (
 	pCreateBitmap           = gdi32.NewProc("CreateBitmap")
 
 	pGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
-	pMciSendStringW       = winmm.NewProc("mciSendStringW")
 	pTimeBeginPeriod      = winmm.NewProc("timeBeginPeriod")
 	pTimeEndPeriod        = winmm.NewProc("timeEndPeriod")
 	pCoInitializeEx       = ole32.NewProc("CoInitializeEx")
@@ -250,7 +249,7 @@ var (
 )
 
 var (
-	mainHwnd, pathEdit, listBox, btnGo, btnBrowse, btnUp, btnPlayFolder, btnSort, btnPrev, btnPlay, btnNext, seekBar, volBar HWND
+	mainHwnd, pathEdit, listBox, btnGo, btnBrowse, btnUp, btnPlayFolder, btnSort, btnShuffle, btnPrev, btnPlay, btnNext, seekBar, volBar HWND
 	hInstance                                                                                                                uintptr
 	appFont, displayFont, meterFont, tinyFont                                                                                HFONT
 	brushDark, brushPanel, brushEdit, brushButton, brushButtonDown, brushCream, brushBlack, brushDisplay, brushLampOn        HBRUSH
@@ -273,6 +272,10 @@ var (
 	browseResult                                                                                                             BrowseResult
 	browseGen                                                                                                                uint32
 	timerTicks                                                                                                               int
+	loading                                                                                                                  bool
+	shuffleMode                                                                                                              bool
+	shuffleQueue, shuffleHistory                                                                                             []int
+	shuffleHistoryPos                                                                                                        = -1
 )
 
 func wstr(s string) *uint16      { p, _ := syscall.UTF16PtrFromString(s); return p }
@@ -385,49 +388,29 @@ func stepNeedle(pos, velocity, target float64) (float64, float64) {
 	return pos, velocity
 }
 
-func mci(cmd string, wantResult bool) (string, error) {
-	buf := make([]uint16, 512)
-	var bp uintptr
-	var bl uintptr
-	if wantResult { bp = uintptr(unsafe.Pointer(&buf[0])); bl = uintptr(len(buf)) }
-	r, _, _ := pMciSendStringW.Call(uintptr(unsafe.Pointer(wstr(cmd))), bp, bl, uintptr(mainHwnd))
-	if r != 0 { return "", fmt.Errorf("MCI error %d", r) }
-	if wantResult { return syscall.UTF16ToString(buf), nil }
-	return "", nil
-}
-func mciNoResult(cmd string) { _, _ = mci(cmd, false) }
-func queryMCIInt(cmd string) int {
-	s, err := mci(cmd, true)
-	if err != nil { return 0 }
-	n, _ := strconv.Atoi(strings.TrimSpace(s))
-	return n
-}
-func playFile(path string, index int) {
-	mciNoResult("close smbplayer")
-	cmd := fmt.Sprintf("open \"%s\" alias smbplayer", strings.ReplaceAll(path, "\"", ""))
-	if _, err := mci(cmd, false); err != nil {
-		currentTrack = "CAN'T OPEN: " + filepath.Base(path)
-		playing, paused = false, false
-		setText(btnPlay, "PLAY")
-		pInvalidateRect.Call(uintptr(mainHwnd), 0, 1)
-		return
-	}
-	currentTrack = path
-	currentIndex = index
-	trackLengthMs = queryMCIInt("status smbplayer length")
-	trackPosMs = 0
-	mciNoResult(fmt.Sprintf("setaudio smbplayer volume to %d", volume))
-	if _, err := mci("play smbplayer notify", false); err != nil {
-		currentTrack = "CAN'T PLAY: " + filepath.Base(path)
-		playing, paused = false, false
-		setText(btnPlay, "PLAY")
-		pInvalidateRect.Call(uintptr(mainHwnd), 0, 1)
-		return
-	}
-	playing, paused = true, false
-	setText(btnPlay, "PAUSE")
+func playbackFailure(path string) {
+	currentTrack = "CAN'T OPEN: " + filepath.Base(path)
+	playing, paused, loading = false, false, false
+	trackLengthMs, trackPosMs = 0, 0
+	setText(btnPlay, "PLAY")
+	send(seekBar, TBM_SETPOS, 1, 0)
 	pInvalidateRect.Call(uintptr(mainHwnd), 0, 1)
 }
+
+func playFile(path string, index int) {
+	currentTrack = path
+	currentIndex = index
+	trackLengthMs, trackPosMs = 0, 0
+	playing, paused, loading = true, false, true
+	setText(btnPlay, "PAUSE")
+	send(seekBar, TBM_SETPOS, 1, 0)
+	if err := mediaOpen(path); err != nil {
+		playbackFailure(path)
+		return
+	}
+	pInvalidateRect.Call(uintptr(mainHwnd), 0, 1)
+}
+
 func isAudio(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".mp3", ".wav", ".wma", ".m4a", ".aac", ".flac", ".ogg":
@@ -435,6 +418,7 @@ func isAudio(path string) bool {
 	}
 	return false
 }
+
 func folderPlaylist() ([]string, map[string]int) {
 	var p []string
 	idx := map[string]int{}
@@ -446,34 +430,118 @@ func folderPlaylist() ([]string, map[string]int) {
 	}
 	return p, idx
 }
+
+func buildShuffleQueue(exclude int) {
+	shuffleQueue = nil
+	if len(playlist) <= 1 { return }
+	perm := rand.Perm(len(playlist))
+	for _, i := range perm {
+		if i != exclude { shuffleQueue = append(shuffleQueue, i) }
+	}
+}
+
+func buildShuffleCycle(current int) {
+	if len(playlist) == 0 { shuffleQueue = nil; return }
+	shuffleQueue = rand.Perm(len(playlist))
+	if len(shuffleQueue) > 1 && shuffleQueue[0] == current {
+		j := 1 + rand.Intn(len(shuffleQueue)-1)
+		shuffleQueue[0], shuffleQueue[j] = shuffleQueue[j], shuffleQueue[0]
+	}
+}
+
+func resetShuffleState(start int) {
+	shuffleQueue = nil
+	shuffleHistory = nil
+	shuffleHistoryPos = -1
+	if !shuffleMode || start < 0 || start >= len(playlist) { return }
+	shuffleHistory = []int{start}
+	shuffleHistoryPos = 0
+	buildShuffleQueue(start)
+}
+
+func startFolderPlayback(p []string) {
+	if len(p) == 0 { return }
+	playlist = p
+	if shuffleMode {
+		i := rand.Intn(len(playlist))
+		resetShuffleState(i)
+		playFile(playlist[i], i)
+		return
+	}
+	resetShuffleState(-1)
+	playFile(playlist[0], 0)
+}
+
 func nextTrack(delta int) {
 	if len(playlist) == 0 { return }
+	if shuffleMode {
+		if delta < 0 {
+			if shuffleHistoryPos > 0 {
+				shuffleHistoryPos--
+				i := shuffleHistory[shuffleHistoryPos]
+				playFile(playlist[i], i)
+			}
+			return
+		}
+		if shuffleHistoryPos+1 < len(shuffleHistory) {
+			shuffleHistoryPos++
+			i := shuffleHistory[shuffleHistoryPos]
+			playFile(playlist[i], i)
+			return
+		}
+		if len(shuffleQueue) == 0 { buildShuffleCycle(currentIndex) }
+		if len(shuffleQueue) == 0 { return }
+		i := shuffleQueue[0]
+		shuffleQueue = shuffleQueue[1:]
+		if shuffleHistoryPos+1 < len(shuffleHistory) {
+			shuffleHistory = shuffleHistory[:shuffleHistoryPos+1]
+		}
+		shuffleHistory = append(shuffleHistory, i)
+		shuffleHistoryPos = len(shuffleHistory)-1
+		playFile(playlist[i], i)
+		return
+	}
 	i := currentIndex
 	if i < 0 { i = 0 } else { i += delta }
 	if i < 0 { i = len(playlist)-1 }
 	if i >= len(playlist) { i = 0 }
 	playFile(playlist[i], i)
 }
+
 func togglePlay() {
-	if !playing {
-		if currentTrack != "" && !strings.HasPrefix(currentTrack, "CAN'T") {
-			mciNoResult("play smbplayer notify")
-			playing, paused = true, false
-			setText(btnPlay, "PAUSE")
-			return
-		}
-		p, _ := folderPlaylist()
-		if len(p) > 0 { playlist = p; playFile(p[0], 0) }
+	if currentTrack == "" || strings.HasPrefix(currentTrack, "CAN'T") || strings.HasPrefix(currentTrack, "AUDIO INIT ERROR") {
 		return
 	}
 	if paused {
-		mciNoResult("resume smbplayer")
-		paused = false
+		if mediaPlay() == nil {
+			playing, paused, loading = true, false, false
+			setText(btnPlay, "PAUSE")
+		}
+		return
+	}
+	if playing {
+		if mediaPause() == nil {
+			paused = true
+			setText(btnPlay, "PLAY")
+		}
+		return
+	}
+	if mediaPlay() == nil {
+		playing, paused = true, false
 		setText(btnPlay, "PAUSE")
+	}
+}
+
+func toggleShuffle() {
+	shuffleMode = !shuffleMode
+	if shuffleMode {
+		setText(btnShuffle, "SHUFFLE: ON")
+		if currentIndex >= 0 && currentIndex < len(playlist) { resetShuffleState(currentIndex) }
 	} else {
-		mciNoResult("pause smbplayer")
-		paused = true
-		setText(btnPlay, "PLAY")
+		setText(btnShuffle, "SHUFFLE: OFF")
+		shuffleQueue = nil
+		shuffleHistory = nil
+		shuffleHistoryPos = -1
 	}
 }
 
@@ -539,7 +607,9 @@ func playSelectedRow(row int) {
 	}
 	p, idx := folderPlaylist()
 	playlist = p
-	playFile(e.Path, idx[e.Path])
+	i := idx[e.Path]
+	resetShuffleState(i)
+	playFile(e.Path, i)
 }
 func chooseFolder(owner HWND) string {
 	display := make([]uint16, 260)
@@ -750,10 +820,10 @@ func drawTopPanel(hdc HDC, rc RECT) {
 	title := "NO TRACK LOADED"
 	if currentTrack != "" { title = strings.ToUpper(strings.TrimSuffix(filepath.Base(currentTrack), filepath.Ext(currentTrack))) }
 	drawText(hdc, title, RECT{136, 198, rc.Right - 36, 221}, DT_CENTER|DT_VCENTER|DT_SINGLELINE, color(242, 184, 65), displayFont)
-	status := "READY"; if playing { if paused { status = "PAUSED" } else { status = "PLAYING" } }
+	status := "READY"; if loading { status = "LOADING" } else if playing { if paused { status = "PAUSED" } else { status = "PLAYING" } }
 	drawText(hdc, fmt.Sprintf("%s    %s  /  %s", status, formatTime(trackPosMs), formatTime(trackLengthMs)), RECT{136, 222, rc.Right - 36, 242}, DT_CENTER|DT_VCENTER|DT_SINGLELINE, color(127, 224, 117), appFont)
 	drawText(hdc, "NETWORK AUDIO", RECT{26, 234, 110, 252}, DT_LEFT|DT_SINGLELINE, color(175, 159, 118), tinyFont)
-	drawText(hdc, "REMOTE AUDIO DECK  •  v0.2.7", RECT{rc.Right / 2, 252, rc.Right - 26, 270}, DT_RIGHT|DT_SINGLELINE, color(125, 128, 119), tinyFont)
+	drawText(hdc, "REMOTE AUDIO DECK  •  v0.3.0", RECT{rc.Right / 2, 252, rc.Right - 26, 270}, DT_RIGHT|DT_SINGLELINE, color(125, 128, 119), tinyFont)
 }
 func paintMain(hwnd HWND) {
 	var ps PAINTSTRUCT
@@ -825,6 +895,7 @@ func layout(hwnd HWND) {
 	pMoveWindow.Call(uintptr(btnUp), uintptr(margin), uintptr(y), uintptr(bw), 30, 1)
 	pMoveWindow.Call(uintptr(btnPlayFolder), uintptr(margin+bw+8), uintptr(y), 150, 30, 1)
 	pMoveWindow.Call(uintptr(btnSort), uintptr(margin+bw+166), uintptr(y), 140, 30, 1)
+	pMoveWindow.Call(uintptr(btnShuffle), uintptr(margin+bw+314), uintptr(y), 140, 30, 1)
 
 	controlY := h - 54
 	labelTop := controlY - 25
@@ -853,6 +924,7 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		btnUp = createWindow(0, "BUTTON", "UP", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0, 0, 0, 0, mainHwnd, ID_UP)
 		btnPlayFolder = createWindow(0, "BUTTON", "PLAY FOLDER", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0, 0, 0, 0, mainHwnd, ID_PLAYFOLDER)
 		btnSort = createWindow(0, "BUTTON", "SORT: A-Z", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0, 0, 0, 0, mainHwnd, ID_SORT)
+		btnShuffle = createWindow(0, "BUTTON", "SHUFFLE: OFF", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0, 0, 0, 0, mainHwnd, ID_SHUFFLE)
 		listBox = createWindow(0, "LISTBOX", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT, 0, 0, 0, 0, mainHwnd, ID_LIST)
 		btnPrev = createWindow(0, "BUTTON", "|<<", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0, 0, 0, 0, mainHwnd, ID_PREV)
 		btnPlay = createWindow(0, "BUTTON", "PLAY", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0, 0, 0, 0, mainHwnd, ID_PLAY)
@@ -862,7 +934,8 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		send(seekBar, TBM_SETRANGE, 1, makeLong(0, 1000)); send(volBar, TBM_SETRANGE, 1, makeLong(0, 1000)); send(volBar, TBM_SETPOS, 1, uintptr(volume))
 		pSetWindowTheme.Call(uintptr(seekBar), uintptr(unsafe.Pointer(wstr(""))), uintptr(unsafe.Pointer(wstr(""))))
 		pSetWindowTheme.Call(uintptr(volBar), uintptr(unsafe.Pointer(wstr(""))), uintptr(unsafe.Pointer(wstr(""))))
-		for _, c := range []HWND{pathEdit, listBox, btnGo, btnBrowse, btnUp, btnPlayFolder, btnSort, btnPrev, btnPlay, btnNext} { send(c, WM_SETFONT, uintptr(appFont), 1) }
+		for _, c := range []HWND{pathEdit, listBox, btnGo, btnBrowse, btnUp, btnPlayFolder, btnSort, btnShuffle, btnPrev, btnPlay, btnNext} { send(c, WM_SETFONT, uintptr(appFont), 1) }
+		if err := initMediaEngine(); err != nil { currentTrack = "AUDIO INIT ERROR: " + err.Error() }
 		pSetTimer.Call(hwnd, TIMER_UI, 10, 0)
 		if s := loadLastFolder(); s != "" { setText(pathEdit, s) } else if home, err := os.UserHomeDir(); err == nil { setText(pathEdit, home) }
 		layout(mainHwnd); return 0
@@ -893,9 +966,11 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		case ID_UP:
 			if code == 0 { p := strings.TrimSpace(getText(pathEdit)); if p != "" { parent := filepath.Dir(p); setText(pathEdit, parent); loadFolderAsync(parent) } }
 		case ID_PLAYFOLDER:
-			if code == 0 { p, _ := folderPlaylist(); if len(p) > 0 { playlist = p; playFile(p[0], 0) } }
+			if code == 0 { p, _ := folderPlaylist(); startFolderPlayback(p) }
 		case ID_SORT:
 			if code == 0 { sortMode = (sortMode+1)%4; labels := []string{"SORT: A-Z", "SORT: Z-A", "SORT: NEW", "SORT: OLD"}; setText(btnSort, labels[sortMode]); sortEntries(currentEntries); populateList() }
+		case ID_SHUFFLE:
+			if code == 0 { toggleShuffle() }
 		case ID_PREV:
 			if code == 0 { nextTrack(-1) }
 		case ID_PLAY:
@@ -908,9 +983,9 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		return 0
 	case WM_HSCROLL:
 		src := HWND(lParam); code := loword(wParam)
-		if src == volBar { volume = int(send(volBar, TBM_GETPOS, 0, 0)); if playing { mciNoResult(fmt.Sprintf("setaudio smbplayer volume to %d", volume)) }; return 0 }
+		if src == volBar { volume = int(send(volBar, TBM_GETPOS, 0, 0)); _ = mediaSetVolume(volume); return 0 }
 		if src == seekBar && (code == TB_ENDTRACK || code == TB_THUMBPOSITION || code == TB_THUMBTRACK) && trackLengthMs > 0 {
-			pos := int(send(seekBar, TBM_GETPOS, 0, 0)); ms := trackLengthMs * pos / 1000; mciNoResult(fmt.Sprintf("seek smbplayer to %d", ms)); if playing && !paused { mciNoResult("play smbplayer notify") }; trackPosMs = ms; return 0
+			pos := int(send(seekBar, TBM_GETPOS, 0, 0)); ms := trackLengthMs * pos / 1000; if mediaSetPosition(ms) == nil { trackPosMs = ms }; return 0
 		}
 	case WM_TIMER:
 		if wParam == TIMER_UI {
@@ -921,8 +996,9 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 				pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&analyzerR)), 0)
 			}
 			if timerTicks%20 == 0 {
-				if playing {
-					trackPosMs = queryMCIInt("status smbplayer position")
+				if playing || paused {
+					trackPosMs = mediaPositionMs()
+					if trackLengthMs <= 0 { trackLengthMs = mediaDurationMs() }
 					if trackLengthMs > 0 { send(seekBar, TBM_SETPOS, 1, uintptr(trackPosMs*1000/trackLengthMs)) }
 				}
 				statusR := RECT{20, 188, 10000, 248}
@@ -936,10 +1012,27 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		setText(btnGo, "GO")
 		if br.Err != nil { currentTrack = "FOLDER ERROR: " + br.Err.Error(); pInvalidateRect.Call(hwnd, 0, 1); return 0 }
 		currentDir, currentEntries = br.Path, br.Entries; setText(pathEdit, currentDir); populateList(); saveLastFolder(currentDir); return 0
-	case MM_MCINOTIFY:
-		if wParam == MCI_NOTIFY_SUCCESSFUL && playing && !paused { nextTrack(1) }; return 0
+	case WM_MEDIA_EVENT:
+		switch uint32(wParam) {
+		case MF_MEDIA_ENGINE_EVENT_ERROR:
+			failed := currentTrack
+			playbackFailure(failed)
+		case MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA, MF_MEDIA_ENGINE_EVENT_DURATIONCHANGE:
+			trackLengthMs = mediaDurationMs()
+			pInvalidateRect.Call(hwnd, 0, 1)
+		case MF_MEDIA_ENGINE_EVENT_PLAYING:
+			loading, playing, paused = false, true, false
+			setText(btnPlay, "PAUSE")
+			pInvalidateRect.Call(hwnd, 0, 1)
+		case MF_MEDIA_ENGINE_EVENT_PAUSE:
+			if playing { paused = true; setText(btnPlay, "PLAY"); pInvalidateRect.Call(hwnd, 0, 1) }
+		case MF_MEDIA_ENGINE_EVENT_ENDED:
+			loading = false
+			if playing && !paused { nextTrack(1) }
+		}
+		return 0
 	case WM_DESTROY:
-		pKillTimer.Call(hwnd, TIMER_UI); stopSpectrumAnalyzer(); mciNoResult("close smbplayer"); if meterInfo != nil { comRelease(meterInfo); meterInfo = nil }; pCoUninitialize.Call(); pPostQuitMessage.Call(0); return 0
+		pKillTimer.Call(hwnd, TIMER_UI); shutdownMediaEngine(); stopSpectrumAnalyzer(); if meterInfo != nil { comRelease(meterInfo); meterInfo = nil }; pCoUninitialize.Call(); pPostQuitMessage.Call(0); return 0
 	}
 	r, _, _ := pDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam); return r
 }
@@ -980,10 +1073,10 @@ func main() {
 	} else {
 		ico = must1(pLoadIconW.Call(0, IDI_APPLICATION))
 	}
-	className := wstr("SMBPlayerPC_V027")
+	className := wstr("SMBPlayerPC_V030")
 	wc := WNDCLASSEX{CbSize: uint32(unsafe.Sizeof(WNDCLASSEX{})), Style: 0x0003, LpfnWndProc: syscall.NewCallback(wndProc), HInstance: hInst, HIcon: ico, HCursor: cur, HbrBackground: brushDark, LpszClassName: className, HIconSm: ico}
 	if r := must1(pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))); r == 0 { return }
-	hwnd := createWindow(0, "SMBPlayerPC_V027", "SMB Player PC v0.2.7", WS_OVERLAPPEDWINDOW, -2147483648, -2147483648, 980, 720, 0, 0)
+	hwnd := createWindow(0, "SMBPlayerPC_V030", "SMB Player PC v0.3.0", WS_OVERLAPPEDWINDOW, -2147483648, -2147483648, 980, 720, 0, 0)
 	if hwnd == 0 { return }
 	pSendMessageW.Call(uintptr(hwnd), WM_SETICON, ICON_BIG, ico)
 	pSendMessageW.Call(uintptr(hwnd), WM_SETICON, ICON_SMALL, ico)
