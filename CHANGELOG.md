@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.1
+
+- Added asynchronous embedded **Title / Artist** metadata display with filename fallback.
+- Added metadata support through `github.com/dhowden/tag` for MP3 ID3, MP4/M4A, OGG, and FLAC tags.
+- Added generation checking so slow network metadata reads cannot overwrite a newer track's display.
+- Added ellipsis handling for long Now Playing metadata strings.
+- Changed **Seek** channel clicks from the native trackbar's wide page jumps to direct click-to-position seeking.
+- Intentionally left the **Volume** slider's existing click/drag behavior unchanged.
+- Converted the decorative POWER lamp into a transport/network-status lamp:
+  - green while actively playing
+  - yellow while loading or waiting/stalled for data
+  - red while stopped, ready, paused, or in error
+- Added Media Foundation WAITING/STALLED buffering-state handling.
+- Added an approximately 1.5-second smooth fade-in when resuming from pause.
+- Added the same fade-in when playback resumes after a detected buffering interruption.
+- The fade does not move the volume slider and yields immediately if the user adjusts volume.
+- Preserved the Media Foundation backend, Shuffle, network filesystem behavior, and 31-band WASAPI spectrum analyzer.
+
 ## v0.3.0
 
 - Replaced the Windows MCI playback backend with Windows Media Foundation **IMFMediaEngine** in audio-only mode.
