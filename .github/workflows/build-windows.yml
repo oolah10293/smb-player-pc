@@ -22,10 +22,10 @@ jobs:
 
       - name: Build
         shell: powershell
-        run: go build -ldflags="-H windowsgui" -o SMBPlayerPC_v0.3.0.exe .
+        run: go build -ldflags="-H windowsgui" -o SMBPlayerPC_v0.3.1.exe .
 
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: SMBPlayerPC-v0.3.0-Windows
-          path: SMBPlayerPC_v0.3.0.exe
+          name: SMBPlayerPC-v0.3.1-Windows
+          path: SMBPlayerPC_v0.3.1.exe
