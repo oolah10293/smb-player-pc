@@ -1,117 +1,84 @@
-# Project Status — 2026-09-20
+# Project Status — 2026-09-21
 
 ## Current version
 
-**v0.3.0 — new playback-backend candidate**
+**v0.3.1 — polish candidate**
 
-The source compiles successfully in GitHub Actions as a 64-bit Windows GUI executable. Runtime validation on Windows is still required before the Media Foundation migration is considered complete.
+## Confirmed v0.3.0 backend result
 
-## What remains preserved from v0.2.7
+The Media Foundation backend solved the key MCI failure without losing the core network-use case.
 
-- Folder-first browser and folder-as-playlist model
-- Native Windows Browse folder picker
-- Manual mapped-drive / UNC path entry
-- Async directory/network enumeration
-- Last-folder memory
-- Existing transport layout
-- Current dark stereo-component visual direction
-- Wide 31-band WASAPI loopback spectrum analyzer
-- Current analyzer FFT / common display AGC behavior
-- Existing VU-style application icon
+Confirmed by runtime test:
+- original unmodified `The Raconteurs - Level.mp3` plays
+- `The Red Jumpsuit Apparatus - Face Down.mp3` plays
+- both were played directly from the network drive
+- user reported the version overall works great
 
-## Playback backend change
+## v0.3.1 changes
 
-The MCI playback path has been removed.
+### Seek behavior
 
-v0.3.0 now uses Windows Media Foundation's **IMFMediaEngine** in audio-only mode. Media Foundation is started on the Win32 UI/COM thread, an IMFMediaEngineNotify callback posts playback events back to the application window, and local/mapped/UNC paths are converted to file URLs for SetSource.
+The native Windows trackbar page-jump behavior made clicks away from the thumb move in large blocks.
 
-The backend now handles:
-- source open/load
-- play
-- pause/resume
-- seek
-- duration/position
-- volume/mute
-- end-of-track notification
+v0.3.1 intercepts trackbar page clicks, maps the mouse position directly to the seek range, and seeks to that exact percentage. Dragging the thumb remains continuous.
 
-The existing WASAPI analyzer remains a separate endpoint-loopback path.
+The **volume slider is intentionally unchanged**.
 
-## Why MCI was removed
+### Metadata
 
-The decision came from a reproducible controlled test rather than a generic compatibility concern.
+Embedded metadata is now loaded asynchronously with `github.com/dhowden/tag`.
 
-Observed spot test:
-- roughly half of the sampled MP3s in one folder played
-- roughly half returned CAN'T OPEN
-- failures were reproducible by file
-- `The Red Jumpsuit Apparatus - Face Down.mp3` played every time
-- `The Raconteurs - Level.mp3` failed every time
+Display priority:
+1. embedded Title
+2. optional Artist appended as `TITLE • ARTIST`
+3. filename stem as fallback
 
-Controlled A/B test on `Level.mp3`:
-1. Original failed from the normal music location.
-2. The same original copied to the local Desktop still failed, ruling out SMB/network access.
-3. Original ID3 block was about 195,352 bytes, dominated by embedded PNG artwork.
-4. A test copy had only the artwork frame removed; its ID3 block dropped to about 4,160 bytes.
-5. The MP3 audio payload remained byte-for-byte identical.
-6. The stripped copy played successfully.
+Network metadata reads are generation-checked so a delayed read for a previous song cannot overwrite the current Now Playing display.
 
-Conclusion: MCI was rejecting the MP3 because of container/tag/header handling, not because of the encoded audio or network path. No guessed tag-size threshold is used in the replacement.
+### Status lamp
 
-## Failure-path fixes included in v0.3.0
+The old decorative POWER lamp is now functional:
 
-- A real playback/open failure now resets elapsed and total time to 0:00 / 0:00.
-- The seek control is reset on failure.
-- PLAY after a failed open no longer blindly starts playlist item 0.
-- Media Engine source changes use a LOADING state.
-- Pause/end events generated while a replacement source is still loading are ignored so an old source cannot easily disturb the new selection.
+- **green** — actively playing
+- **yellow** — loading or Media Foundation WAITING/STALLED buffering state
+- **red** — ready/stopped, paused, or error
 
-## Shuffle added
+The text status also reports LOADING or BUFFERING where appropriate.
 
-v0.3.0 adds a **SHUFFLE: OFF / SHUFFLE: ON** control.
+### Resume / recovery ramp
 
-Behavior:
-- Play Folder starts at a random track when Shuffle is ON.
-- Every track is visited once in the initial shuffle cycle.
-- Subsequent cycles are re-randomized.
-- A cycle boundary avoids an immediate repeat of the track that just played.
-- Previous follows actual shuffle history.
-- After going backward, Next follows forward history before taking a new shuffled choice.
-- With Shuffle OFF, normal sorted folder order is unchanged.
+A smooth approximately **1.5 second** fade-in is applied:
+- when manually resuming from pause
+- when playback recovers from a Media Foundation WAITING/STALLED buffering event
 
-## v0.3.0 runtime acceptance tests
-
-Still to validate on Windows:
-
-- [ ] Original unmodified `The Raconteurs - Level.mp3` plays.
-- [ ] `The Red Jumpsuit Apparatus - Face Down.mp3` still plays.
-- [ ] Local playback works.
-- [ ] Mapped-drive playback works.
-- [ ] UNC playback works.
-- [ ] Pause/resume works.
-- [ ] Seek works.
-- [ ] Volume/mute works.
-- [ ] Previous/Next work.
-- [ ] Track-end auto-advance works.
-- [ ] Shuffle works as intended.
-- [ ] Spectrum analyzer still works and remains visually correct.
-- [ ] Application remains responsive.
-
-The file browser still recognizes MP3, WAV, WMA, M4A, AAC, FLAC, and OGG. Actual decode support through Media Foundation should be recorded only after runtime testing.
-
-## Next functional polish after backend validation
-
-- Embedded title/artist metadata in the Now Playing area.
-- Clean filename fallback/recentering when metadata is absent.
-- Any analyzer adjustment only if actual use exposes a specific problem.
+The volume slider does not move during the fade. Its selected volume remains the target. If the user touches the volume control during a ramp, the ramp is cancelled and the user's selected volume takes control immediately.
 
 ## Preserve
 
+- Media Foundation IMFMediaEngine playback
 - folder = playlist
-- normal Windows local/mapped/UNC filesystem access
+- mapped-drive / UNC filesystem behavior
 - native Browse
 - manual path + GO
-- async folder enumeration
-- current UI identity
+- asynchronous folder enumeration
+- Shuffle behavior
+- current dark stereo-component UI
 - current 31-band analyzer
 - VU-style app icon
 - single-EXE distribution
+
+## v0.3.1 runtime checks
+
+- [ ] Metadata displays correctly on tagged tracks.
+- [ ] Filename fallback works on untagged tracks.
+- [ ] Clicking empty space on Seek jumps directly to the clicked position.
+- [ ] Thumb dragging still seeks normally.
+- [ ] Volume slider behavior is unchanged.
+- [ ] Lamp is green while playing.
+- [ ] Lamp is red while paused/stopped.
+- [ ] Lamp becomes yellow during observable loading/buffering.
+- [ ] Resume fade is about 1.5 seconds and does not move the volume slider.
+- [ ] Buffer-recovery fade behaves similarly.
+- [ ] Network playback remains stable.
+- [ ] Shuffle remains correct.
+- [ ] Spectrum analyzer remains correct.
