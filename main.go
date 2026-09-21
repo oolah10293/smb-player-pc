@@ -148,6 +148,7 @@ const (
 	DT_SINGLELINE            = 0x00000020
 	DT_LEFT                  = 0x00000000
 	DT_RIGHT                 = 0x00000002
+	DT_END_ELLIPSIS          = 0x00008000
 	TRANSPARENT              = 1
 	PS_SOLID                 = 0
 	FW_BOLD                  = 700
@@ -585,7 +586,7 @@ func togglePlay() {
 	if paused {
 		startVolumeRamp()
 		if mediaPlay() == nil {
-			playing, paused, loading = true, false, false
+			playing, paused, loading, buffering = true, false, false, false
 			setText(btnPlay, "PAUSE")
 		} else {
 			volumeRampActive = false
@@ -596,6 +597,7 @@ func togglePlay() {
 	if playing {
 		if mediaPause() == nil {
 			volumeRampActive = false
+			buffering = false
 			paused = true
 			setText(btnPlay, "PLAY")
 		}
@@ -894,7 +896,7 @@ func drawTopPanel(hdc HDC, rc RECT) {
 	displayR := RECT{120, 192, rc.Right - 24, 248}
 	fill(hdc, displayR, brushDisplay); drawInsetFrame(hdc, displayR)
 	title := nowPlayingDisplay(currentTrack)
-	drawText(hdc, title, RECT{136, 198, rc.Right - 36, 221}, DT_CENTER|DT_VCENTER|DT_SINGLELINE, color(242, 184, 65), displayFont)
+	drawText(hdc, title, RECT{136, 198, rc.Right - 36, 221}, DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS, color(242, 184, 65), displayFont)
 	status := "READY"; if loading { status = "LOADING" } else if buffering { status = "BUFFERING" } else if playing { if paused { status = "PAUSED" } else { status = "PLAYING" } }
 	drawText(hdc, fmt.Sprintf("%s    %s  /  %s", status, formatTime(trackPosMs), formatTime(trackLengthMs)), RECT{136, 222, rc.Right - 36, 242}, DT_CENTER|DT_VCENTER|DT_SINGLELINE, color(127, 224, 117), appFont)
 	drawText(hdc, "NETWORK AUDIO", RECT{26, 234, 110, 252}, DT_LEFT|DT_SINGLELINE, color(175, 159, 118), tinyFont)
