@@ -136,6 +136,8 @@ const (
 	TBM_GETPOS               = 0x0400
 	TBM_SETPOS               = 0x0405
 	TBM_SETRANGE             = 0x0406
+	TB_PAGEUP                = 2
+	TB_PAGEDOWN              = 3
 	TB_ENDTRACK              = 8
 	TB_THUMBPOSITION         = 4
 	TB_THUMBTRACK            = 5
@@ -174,6 +176,7 @@ const (
 	TIMER_UI       = 1
 	WM_BROWSE_DONE = WM_APP + 1
 	WM_MEDIA_EVENT = WM_APP + 2
+	WM_METADATA_DONE = WM_APP + 3
 )
 
 var (
@@ -216,6 +219,8 @@ var (
 	pReleaseDC            = user32.NewProc("ReleaseDC")
 	pCreateIconIndirect   = user32.NewProc("CreateIconIndirect")
 	pDestroyIcon          = user32.NewProc("DestroyIcon")
+	pGetCursorPos         = user32.NewProc("GetCursorPos")
+	pScreenToClient       = user32.NewProc("ScreenToClient")
 
 	pSetBkColor             = gdi32.NewProc("SetBkColor")
 	pSetTextColor           = gdi32.NewProc("SetTextColor")
@@ -252,8 +257,10 @@ var (
 	mainHwnd, pathEdit, listBox, btnGo, btnBrowse, btnUp, btnPlayFolder, btnSort, btnShuffle, btnPrev, btnPlay, btnNext, seekBar, volBar HWND
 	hInstance                                                                                                                uintptr
 	appFont, displayFont, meterFont, tinyFont                                                                                HFONT
-	brushDark, brushPanel, brushEdit, brushButton, brushButtonDown, brushCream, brushBlack, brushDisplay, brushLampOn        HBRUSH
-	penBlack, penRed, penScale, penBevelLight, penBevelDark, penMeterLight, penMeterGlow, penPanelAccent, penLampGlow       HPEN
+	brushDark, brushPanel, brushEdit, brushButton, brushButtonDown, brushCream, brushBlack, brushDisplay                    HBRUSH
+	brushLampGreen, brushLampYellow, brushLampRed                                                                          HBRUSH
+	penBlack, penRed, penScale, penBevelLight, penBevelDark, penMeterLight, penMeterGlow, penPanelAccent                  HPEN
+	penLampGreen, penLampYellow, penLampRed                                                                                HPEN
 	currentEntries                                                                                                           []Entry
 	currentDir                                                                                                               string
 	sortMode                                                                                                                 int
@@ -273,6 +280,10 @@ var (
 	browseGen                                                                                                                uint32
 	timerTicks                                                                                                               int
 	loading                                                                                                                  bool
+	buffering                                                                                                                bool
+	volumeRampActive                                                                                                         bool
+	volumeRampStart                                                                                                          time.Time
+	volumeRampTarget                                                                                                         int
 	shuffleMode                                                                                                              bool
 	shuffleQueue, shuffleHistory                                                                                             []int
 	shuffleHistoryPos                                                                                                        = -1
@@ -388,9 +399,65 @@ func stepNeedle(pos, velocity, target float64) (float64, float64) {
 	return pos, velocity
 }
 
+func startVolumeRamp() {
+	volumeRampTarget = volume
+	volumeRampStart = time.Now()
+	volumeRampActive = true
+	_ = mediaSetVolume(0)
+}
+
+func updateVolumeRamp() {
+	if !volumeRampActive { return }
+	const rampDuration = 1500 * time.Millisecond
+	elapsed := time.Since(volumeRampStart)
+	if elapsed >= rampDuration {
+		volumeRampActive = false
+		_ = mediaSetVolume(volumeRampTarget)
+		return
+	}
+	x := float64(elapsed) / float64(rampDuration)
+	// Smoothstep keeps both ends of the ramp gentle while still reaching
+	// the selected volume in about 1.5 seconds.
+	x = x*x*(3-2*x)
+	level := int(float64(volumeRampTarget)*x + 0.5)
+	_ = mediaSetVolume(level)
+}
+
+func seekToPointer() bool {
+	if trackLengthMs <= 0 || seekBar == 0 { return false }
+	var pt POINT
+	if r, _, _ := pGetCursorPos.Call(uintptr(unsafe.Pointer(&pt))); r == 0 { return false }
+	if r, _, _ := pScreenToClient.Call(uintptr(seekBar), uintptr(unsafe.Pointer(&pt))); r == 0 { return false }
+	var rc RECT
+	pGetClientRect.Call(uintptr(seekBar), uintptr(unsafe.Pointer(&rc)))
+	w := rc.Right - rc.Left
+	if w <= 1 { return false }
+	x := pt.X - rc.Left
+	if x < 0 { x = 0 }
+	if x > w-1 { x = w-1 }
+	pos := int(int64(x) * 1000 / int64(w-1))
+	send(seekBar, TBM_SETPOS, 1, uintptr(pos))
+	ms := trackLengthMs * pos / 1000
+	if mediaSetPosition(ms) != nil { return false }
+	trackPosMs = ms
+	return true
+}
+
+func lampResources() (HBRUSH, HPEN) {
+	if loading || buffering {
+		return brushLampYellow, penLampYellow
+	}
+	if playing && !paused {
+		return brushLampGreen, penLampGreen
+	}
+	return brushLampRed, penLampRed
+}
+
 func playbackFailure(path string) {
 	currentTrack = "CAN'T OPEN: " + filepath.Base(path)
-	playing, paused, loading = false, false, false
+	playing, paused, loading, buffering = false, false, false, false
+	volumeRampActive = false
+	clearTrackMetadata()
 	trackLengthMs, trackPosMs = 0, 0
 	setText(btnPlay, "PLAY")
 	send(seekBar, TBM_SETPOS, 1, 0)
@@ -401,7 +468,10 @@ func playFile(path string, index int) {
 	currentTrack = path
 	currentIndex = index
 	trackLengthMs, trackPosMs = 0, 0
-	playing, paused, loading = true, false, true
+	playing, paused, loading, buffering = true, false, true, false
+	volumeRampActive = false
+	requestTrackMetadata(path)
+	_ = mediaSetVolume(volume)
 	setText(btnPlay, "PAUSE")
 	send(seekBar, TBM_SETPOS, 1, 0)
 	if err := mediaOpen(path); err != nil {
@@ -513,14 +583,19 @@ func togglePlay() {
 		return
 	}
 	if paused {
+		startVolumeRamp()
 		if mediaPlay() == nil {
 			playing, paused, loading = true, false, false
 			setText(btnPlay, "PAUSE")
+		} else {
+			volumeRampActive = false
+			_ = mediaSetVolume(volume)
 		}
 		return
 	}
 	if playing {
 		if mediaPause() == nil {
+			volumeRampActive = false
 			paused = true
 			setText(btnPlay, "PLAY")
 		}
@@ -809,21 +884,21 @@ func drawTopPanel(hdc HDC, rc RECT) {
 	analyzerR := RECT{leftR.Left, leftR.Top, rightR.Right, rightR.Bottom}
 	drawSpectrumAnalyzer(hdc, analyzerR)
 
-	oldB, _, _ := pSelectObject.Call(uintptr(hdc), uintptr(brushLampOn))
-	oldP, _, _ := pSelectObject.Call(uintptr(hdc), uintptr(penLampGlow))
+	lampBrush, lampPen := lampResources()
+	oldB, _, _ := pSelectObject.Call(uintptr(hdc), uintptr(lampBrush))
+	oldP, _, _ := pSelectObject.Call(uintptr(hdc), uintptr(lampPen))
 	pEllipse.Call(uintptr(hdc), 32, 206, 48, 222)
 	pSelectObject.Call(uintptr(hdc), oldP); pSelectObject.Call(uintptr(hdc), oldB)
 	drawText(hdc, "POWER", RECT{54, 204, 104, 223}, DT_LEFT|DT_VCENTER|DT_SINGLELINE, color(164, 177, 160), tinyFont)
 
 	displayR := RECT{120, 192, rc.Right - 24, 248}
 	fill(hdc, displayR, brushDisplay); drawInsetFrame(hdc, displayR)
-	title := "NO TRACK LOADED"
-	if currentTrack != "" { title = strings.ToUpper(strings.TrimSuffix(filepath.Base(currentTrack), filepath.Ext(currentTrack))) }
+	title := nowPlayingDisplay(currentTrack)
 	drawText(hdc, title, RECT{136, 198, rc.Right - 36, 221}, DT_CENTER|DT_VCENTER|DT_SINGLELINE, color(242, 184, 65), displayFont)
-	status := "READY"; if loading { status = "LOADING" } else if playing { if paused { status = "PAUSED" } else { status = "PLAYING" } }
+	status := "READY"; if loading { status = "LOADING" } else if buffering { status = "BUFFERING" } else if playing { if paused { status = "PAUSED" } else { status = "PLAYING" } }
 	drawText(hdc, fmt.Sprintf("%s    %s  /  %s", status, formatTime(trackPosMs), formatTime(trackLengthMs)), RECT{136, 222, rc.Right - 36, 242}, DT_CENTER|DT_VCENTER|DT_SINGLELINE, color(127, 224, 117), appFont)
 	drawText(hdc, "NETWORK AUDIO", RECT{26, 234, 110, 252}, DT_LEFT|DT_SINGLELINE, color(175, 159, 118), tinyFont)
-	drawText(hdc, "REMOTE AUDIO DECK  •  v0.3.0", RECT{rc.Right / 2, 252, rc.Right - 26, 270}, DT_RIGHT|DT_SINGLELINE, color(125, 128, 119), tinyFont)
+	drawText(hdc, "REMOTE AUDIO DECK  •  v0.3.1", RECT{rc.Right / 2, 252, rc.Right - 26, 270}, DT_RIGHT|DT_SINGLELINE, color(125, 128, 119), tinyFont)
 }
 func paintMain(hwnd HWND) {
 	var ps PAINTSTRUCT
@@ -983,7 +1058,8 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		return 0
 	case WM_HSCROLL:
 		src := HWND(lParam); code := loword(wParam)
-		if src == volBar { volume = int(send(volBar, TBM_GETPOS, 0, 0)); _ = mediaSetVolume(volume); return 0 }
+		if src == volBar { volumeRampActive = false; volume = int(send(volBar, TBM_GETPOS, 0, 0)); _ = mediaSetVolume(volume); return 0 }
+		if src == seekBar && (code == TB_PAGEUP || code == TB_PAGEDOWN) { seekToPointer(); return 0 }
 		if src == seekBar && (code == TB_ENDTRACK || code == TB_THUMBPOSITION || code == TB_THUMBTRACK) && trackLengthMs > 0 {
 			pos := int(send(seekBar, TBM_GETPOS, 0, 0)); ms := trackLengthMs * pos / 1000; if mediaSetPosition(ms) == nil { trackPosMs = ms }; return 0
 		}
@@ -991,6 +1067,7 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		if wParam == TIMER_UI {
 			timerTicks++
 			if timerTicks%2 == 0 {
+				updateVolumeRamp()
 				leftR, rightR := meterRects(HWND(hwnd))
 				analyzerR := RECT{leftR.Left, leftR.Top, rightR.Right, rightR.Bottom}
 				pInvalidateRect.Call(hwnd, uintptr(unsafe.Pointer(&analyzerR)), 0)
@@ -1012,16 +1089,27 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		setText(btnGo, "GO")
 		if br.Err != nil { currentTrack = "FOLDER ERROR: " + br.Err.Error(); pInvalidateRect.Call(hwnd, 0, 1); return 0 }
 		currentDir, currentEntries = br.Path, br.Entries; setText(pathEdit, currentDir); populateList(); saveLastFolder(currentDir); return 0
+	case WM_METADATA_DONE:
+		if metadataGenerationMatches(uint32(wParam)) { pInvalidateRect.Call(hwnd, 0, 1) }
+		return 0
 	case WM_MEDIA_EVENT:
 		switch uint32(wParam) {
 		case MF_MEDIA_ENGINE_EVENT_ERROR:
 			failed := currentTrack
 			playbackFailure(failed)
+		case MF_MEDIA_ENGINE_EVENT_STALLED, MF_MEDIA_ENGINE_EVENT_WAITING:
+			if playing && !paused {
+				buffering = true
+				volumeRampActive = false
+				pInvalidateRect.Call(hwnd, 0, 1)
+			}
 		case MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA, MF_MEDIA_ENGINE_EVENT_DURATIONCHANGE:
 			trackLengthMs = mediaDurationMs()
 			pInvalidateRect.Call(hwnd, 0, 1)
 		case MF_MEDIA_ENGINE_EVENT_PLAYING:
-			loading, playing, paused = false, true, false
+			wasBuffering := buffering
+			loading, buffering, playing, paused = false, false, true, false
+			if wasBuffering { startVolumeRamp() }
 			setText(btnPlay, "PAUSE")
 			pInvalidateRect.Call(hwnd, 0, 1)
 		case MF_MEDIA_ENGINE_EVENT_PAUSE:
@@ -1052,7 +1140,9 @@ func main() {
 	brushButtonDown = HBRUSH(must1(pCreateSolidBrush.Call(color(78, 74, 62))))
 	brushCream = HBRUSH(must1(pCreateSolidBrush.Call(color(231, 220, 182))))
 	brushDisplay = HBRUSH(must1(pCreateSolidBrush.Call(color(8, 18, 14))))
-	brushLampOn = HBRUSH(must1(pCreateSolidBrush.Call(color(104, 226, 82))))
+	brushLampGreen = HBRUSH(must1(pCreateSolidBrush.Call(color(104, 226, 82))))
+	brushLampYellow = HBRUSH(must1(pCreateSolidBrush.Call(color(236, 187, 62))))
+	brushLampRed = HBRUSH(must1(pCreateSolidBrush.Call(color(205, 58, 47))))
 	brushBlack = HBRUSH(must1(pCreateSolidBrush.Call(color(25, 25, 22))))
 	penBlack = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(35, 32, 26))))
 	penRed = HPEN(must1(pCreatePen.Call(PS_SOLID, 2, color(178, 45, 34))))
@@ -1062,7 +1152,9 @@ func main() {
 	penMeterLight = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(250, 243, 215))))
 	penMeterGlow = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(236, 228, 196))))
 	penPanelAccent = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(46, 49, 47))))
-	penLampGlow = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(178, 255, 152))))
+	penLampGreen = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(178, 255, 152))))
+	penLampYellow = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(255, 224, 120))))
+	penLampRed = HPEN(must1(pCreatePen.Call(PS_SOLID, 1, color(255, 132, 112))))
 	appFont = HFONT(must1(pCreateFontW.Call(17, 0, 0, 0, FW_NORMAL, 0, 0, 0, 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(wstr("Segoe UI"))))))
 	displayFont = HFONT(must1(pCreateFontW.Call(24, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(wstr("Consolas"))))))
 	meterFont = HFONT(must1(pCreateFontW.Call(15, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(wstr("Segoe UI"))))))
@@ -1076,10 +1168,10 @@ func main() {
 	} else {
 		ico = must1(pLoadIconW.Call(0, IDI_APPLICATION))
 	}
-	className := wstr("SMBPlayerPC_V030")
+	className := wstr("SMBPlayerPC_V031")
 	wc := WNDCLASSEX{CbSize: uint32(unsafe.Sizeof(WNDCLASSEX{})), Style: 0x0003, LpfnWndProc: syscall.NewCallback(wndProc), HInstance: hInst, HIcon: ico, HCursor: cur, HbrBackground: brushDark, LpszClassName: className, HIconSm: ico}
 	if r := must1(pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))); r == 0 { return }
-	hwnd := createWindow(0, "SMBPlayerPC_V030", "SMB Player PC v0.3.0", WS_OVERLAPPEDWINDOW, -2147483648, -2147483648, 980, 720, 0, 0)
+	hwnd := createWindow(0, "SMBPlayerPC_V031", "SMB Player PC v0.3.1", WS_OVERLAPPEDWINDOW, -2147483648, -2147483648, 980, 720, 0, 0)
 	if hwnd == 0 { return }
 	pSendMessageW.Call(uintptr(hwnd), WM_SETICON, ICON_BIG, ico)
 	pSendMessageW.Call(uintptr(hwnd), WM_SETICON, ICON_SMALL, ico)
