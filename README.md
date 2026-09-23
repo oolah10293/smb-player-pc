@@ -52,6 +52,8 @@ Shuffle preserves the core **folder = playlist** rule. With Shuffle ON, a cycle 
 
 This player is planned to become one controller/client for the synchronized house-audio system while preserving its current standalone behavior.
 
+The permanent backend is now planned to run on the existing Raspberry Pi that already owns the music files. The Pi will read the library locally, use MPD for the one shared playback session, and use Snapserver for synchronized distribution. The Windows app remains a controller and optional renderer rather than the authority for the house session.
+
 The mode should be selected automatically:
 
 - **HOUSE** — the PC discovers and verifies the house-audio service directly on the local home LAN. The UI controls the **one shared house playback session** and the PC may also act as a synchronized renderer.
@@ -67,11 +69,11 @@ The existing folder-first UI remains authoritative as a control model: **folders
 
 Related projects:
 
-- [house-audio-server](https://github.com/oolah10293/house-audio-server) — central queue/session authority and synchronized stream
+- [house-audio-server](https://github.com/oolah10293/house-audio-server) — Raspberry Pi MPD/Snapserver backend plus control/discovery layer
 - [house-audio-esp32](https://github.com/oolah10293/house-audio-esp32) — ESP32-S3 synchronized renderer nodes
 - [smb-music-player](https://github.com/oolah10293/smb-music-player) — Android player/controller
 
-Implementation is intentionally deferred until the ESP32-S3 renderer path is proven. See Issue #5 for the current architecture notes.
+Implementation is intentionally deferred until the Raspberry Pi Snapserver path and ESP32-S3 renderer path are proven. See Issue #5 for the current architecture notes.
 
 ## Design direction
 
