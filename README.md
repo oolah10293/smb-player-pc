@@ -48,6 +48,31 @@ Metadata extraction is asynchronous and generation-checked so a slow network rea
 
 Shuffle preserves the core **folder = playlist** rule. With Shuffle ON, a cycle visits every track before rerandomizing, avoids an immediate repeat across cycle boundaries, and Previous/Next preserve actual shuffle history.
 
+## Future whole-house audio integration
+
+This player is planned to become one controller/client for the synchronized house-audio system while preserving its current standalone behavior.
+
+The mode should be selected automatically:
+
+- **HOUSE** — the PC discovers and verifies the house-audio service directly on the local home LAN. The UI controls the **one shared house playback session** and the PC may also act as a synchronized renderer.
+- **STANDALONE** — the house service is not present on the local LAN, so the program behaves exactly as it does today using Media Foundation and normal local/mapped/UNC files.
+
+Detection must be based on the local network, **not specifically on Wi-Fi**. A hardwired PC on home Ethernet is just as much a HOUSE client as a laptop on home Wi-Fi. Preferred detection is mDNS/DNS-SD plus a short LAN handshake, with a reserved LAN address only as a fallback.
+
+**Tailscale/VPN reachability alone must not trigger HOUSE mode.** If a laptop is away from home but can route back through Tailscale, it remains STANDALONE. Any fixed-address fallback should verify that the route is through a normal LAN interface rather than a VPN/tunnel.
+
+There is no separate local music session inside the house. One active output simply means the shared house session currently has one renderer; powering up another output makes it join the same song at the current timestamp.
+
+The existing folder-first UI remains authoritative as a control model: **folders are playlists**.
+
+Related projects:
+
+- [house-audio-server](https://github.com/oolah10293/house-audio-server) — central queue/session authority and synchronized stream
+- [house-audio-esp32](https://github.com/oolah10293/house-audio-esp32) — ESP32-S3 synchronized renderer nodes
+- [smb-music-player](https://github.com/oolah10293/smb-music-player) — Android player/controller
+
+Implementation is intentionally deferred until the ESP32-S3 renderer path is proven. See Issue #5 for the current architecture notes.
+
 ## Design direction
 
 The analyzer remains the visual centerpiece. The VU-style app icon stays as an homage to the original analog-meter versions.
