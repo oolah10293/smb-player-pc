@@ -59,9 +59,11 @@ The mode should be selected automatically:
 - **HOUSE** — the PC discovers and verifies the house-audio service directly on the local home LAN. The UI controls the **one shared house playback session** and the PC may also act as a synchronized renderer.
 - **STANDALONE** — the house service is not present on the local LAN, so the program behaves exactly as it does today using Media Foundation and normal local/mapped/UNC files.
 
-Detection must be based on the local network, **not specifically on Wi-Fi**. A hardwired PC on home Ethernet is just as much a HOUSE client as a laptop on home Wi-Fi. Preferred detection is mDNS/DNS-SD plus a short LAN handshake, with a reserved LAN address only as a fallback.
+Detection must be based on the local network, **not specifically on Wi-Fi**. A hardwired PC on home Ethernet is just as much a HOUSE client as a laptop on home Wi-Fi.
 
-**Tailscale/VPN reachability alone must not trigger HOUSE mode.** If a laptop is away from home but can route back through Tailscale, it remains STANDALONE. Any fixed-address fallback should verify that the route is through a normal LAN interface rather than a VPN/tunnel.
+The current cross-project decision is intentionally simpler than the earlier mDNS idea: choose a non-VPN Ethernet/Wi-Fi path, connect to the locally configured house LAN address on MPD port 6600, and require MPD's normal `OK MPD ...` greeting. That probe is only for HOUSE presence/identity; normal control goes through `house-audio-server`.
+
+**Tailscale/VPN reachability alone must not trigger HOUSE mode.** If a laptop is away from home but can route back through Tailscale, it remains STANDALONE.
 
 There is no separate local music session inside the house. One active output simply means the shared house session currently has one renderer; powering up another output makes it join the same song at the current timestamp.
 
@@ -73,7 +75,20 @@ Related projects:
 - [house-audio-esp32](https://github.com/oolah10293/house-audio-esp32) — ESP32-S3 synchronized renderer nodes
 - [smb-music-player](https://github.com/oolah10293/smb-music-player) — Android player/controller
 
-Implementation is intentionally deferred until the Raspberry Pi Snapserver path and ESP32-S3 renderer path are proven. See Issue #5 for the current architecture notes.
+The Raspberry Pi/Snapserver path and ESP32 renderer architecture are now proven well beyond the original prerequisite: two independent XIAO ESP32-S3 + PCM5102A renderers have played audibly in sync through different downstream audio systems, and passive-radio power-on/rejoin behavior works without a phone. Windows HOUSE implementation is still deferred until the shared controller-presence/output-state contract and remaining server session details are ready. See Issue #5 for the current architecture notes.
+
+### Current house-audio proof relevant to Windows
+
+The house backend now has real runtime proof for:
+
+- shared MPD browse/queue/state/transport control through `house-audio-server`;
+- renderer presence through hard power-off/reconnect;
+- passive-node auto-start and same-session rejoin;
+- passive-radio resume of an existing paused session;
+- two simultaneous ESP32/PCM5102A outputs audibly synchronized;
+- unattended renderer diagnostics for an occasional few-second single-node dropout still under investigation.
+
+This means the future PC work is no longer blocked on proving the central audio architecture. It is primarily a HOUSE controller/client integration problem plus, if desired, adding a synchronized PC renderer.
 
 ## Design direction
 
