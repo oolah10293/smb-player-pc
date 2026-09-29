@@ -120,3 +120,14 @@ The shared server now has a field-proven persisted passive default selector:
 - a real test changed `MP3s` -> `Rap`, left the current song untouched, then after about ten minutes with the final S3 off, the next S3 power-on started a fresh Rap session (first observed track: Ludacris — *Southern Hospitality*).
 
 Future Windows HOUSE control should use the same settings API rather than inventing a separate default-playlist mechanism.
+
+
+### v0.8.0 controller backend status
+
+The shared HOUSE controller/output API is now implemented and deployed on the permanent Pi.
+
+v0.8.0 provides controller attach/heartbeat/detach, 5-second heartbeats with 15-second expiry, durable controller↔renderer ownership, and server policy for muted/unavailable outputs. Initial deployment checks show the existing S3 remains correctly classified as a passive renderer when no controller is attached. Physical controller pause/resume/expiry transitions still need field validation.
+
+This API is shared infrastructure for Android, Windows, and browser clients; future SMB Player PC HOUSE mode should use it rather than inventing its own presence model.
+
+Restart semantics are also settled: a `house-audio-server` restart ends the old listening session. Live controller leases/output state/session state are not restored. Durable passive-default configuration and controller↔renderer ownership persist. After restart a controller reconnect alone stays idle; a passive S3 can start a fresh shuffled default session. Explicit server startup normalization to fresh idle is still pending implementation.
