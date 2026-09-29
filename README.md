@@ -130,4 +130,13 @@ v0.8.0 provides controller attach/heartbeat/detach, 5-second heartbeats with 15-
 
 This API is shared infrastructure for Android, Windows, and browser clients; future SMB Player PC HOUSE mode should use it rather than inventing its own presence model.
 
-Restart semantics are also settled: a `house-audio-server` restart ends the old listening session. Live controller leases/output state/session state are not restored. Durable passive-default configuration and controller↔renderer ownership persist. After restart a controller reconnect alone stays idle; a passive S3 can start a fresh shuffled default session. Explicit server startup normalization to fresh idle is still pending implementation.
+Restart semantics are settled and implemented in server v0.8.1: a `house-audio-server` restart ends the old listening session and normalizes MPD to fresh idle. Live controller leases/output state/session state are not restored. Durable passive-default configuration and controller↔renderer ownership persist. The permanent Pi has field-proven the restart case with one passive S3 already present: startup reached ready and a fresh randomized Rap session started.
+
+
+### v0.8.1 restart field proof
+
+Server v0.8.1 is now installed on the permanent Pi. A service restart performed while one passive S3 remained powered discarded the old listening session and started a fresh randomized Rap session.
+
+The server snapshot reported `startup.ready: true`, `lastAction: started_default_session`, one passive/audible renderer, zero controllers, and the persisted `Rap` default. This confirms the shared restart contract future Windows HOUSE mode should follow: reconnect with fresh controller state and never attempt to resurrect the pre-restart session.
+
+Physical controller pause/resume/expiry transitions remain pending server acceptance tests.
