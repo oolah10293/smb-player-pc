@@ -85,7 +85,7 @@ The house backend now has real runtime proof for:
 - renderer presence through hard power-off/reconnect;
 - passive-node auto-start and same-session rejoin;
 - passive-radio resume of an existing paused session;
-- v0.6.1 final-track-boundary recovery, including MPD `single oneshot` landing paused at 0.0 on the next track and a returning radio resuming that retained queue;
+- completed-drain handling through v0.6.2+: MPD may land paused at 0.0 on the next old-queue track, but that is treated as fresh idle; the next passive start loads a newly shuffled configured default rather than resurrecting the old queue;
 - two simultaneous ESP32/PCM5102A outputs audibly synchronized;
 - unattended renderer diagnostics for an occasional few-second single-node dropout still under investigation.
 
@@ -108,3 +108,15 @@ GitHub Actions builds a Windows executable artifact on every push to `main` and 
 ## Project philosophy
 
 This is deliberately **not** a music-library database application. The filesystem remains the source of truth. Your folders are your playlists.
+
+
+### v0.7.0 passive-default server proof
+
+The shared server now has a field-proven persisted passive default selector:
+
+- current default can be read as `MP3s` or `Rap`;
+- changing the setting does not disturb active playback;
+- after a completed drain, the next passive S3 session uses the saved choice;
+- a real test changed `MP3s` -> `Rap`, left the current song untouched, then after about ten minutes with the final S3 off, the next S3 power-on started a fresh Rap session (first observed track: Ludacris — *Southern Hospitality*).
+
+Future Windows HOUSE control should use the same settings API rather than inventing a separate default-playlist mechanism.
