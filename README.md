@@ -85,6 +85,7 @@ The house backend now has real runtime proof for:
 - renderer presence through hard power-off/reconnect;
 - passive-node auto-start and same-session rejoin;
 - passive-radio resume of an existing paused session;
+- v0.6.1 final-track-boundary recovery, including MPD `single oneshot` landing paused at 0.0 on the next track and a returning radio resuming that retained queue;
 - two simultaneous ESP32/PCM5102A outputs audibly synchronized;
 - unattended renderer diagnostics for an occasional few-second single-node dropout still under investigation.
 
