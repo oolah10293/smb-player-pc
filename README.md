@@ -61,9 +61,9 @@ The mode should be selected automatically:
 
 Detection must be based on the local network, **not specifically on Wi-Fi**. A hardwired PC on home Ethernet is just as much a HOUSE client as a laptop on home Wi-Fi.
 
-The current cross-project decision is intentionally simpler than the earlier mDNS idea: choose a non-VPN Ethernet/Wi-Fi path, connect to the locally configured house LAN address on MPD port 6600, and require MPD's normal `OK MPD ...` greeting. That probe is only for HOUSE presence/identity; normal control goes through `house-audio-server`.
+The cross-project authority rule remains simple: HOUSE requires evidence that the configured Pi LAN address belongs to the **physically attached non-VPN Ethernet/Wi-Fi LAN**, plus the expected Pi identity. Normal controller/audio traffic does not have to be forcibly bound to that physical interface if the platform's VPN model makes that unreliable. Android v0.4.0 proved this distinction matters: explicit physical-`Network` transport stalled with Tailscale enabled even though normal routing could still reach the Pi.
 
-**Tailscale/VPN reachability alone must not trigger HOUSE mode.** If a laptop is away from home but can route back through Tailscale, it remains STANDALONE.
+**Tailscale/VPN reachability alone must not trigger HOUSE mode.** If a laptop is away from home but can route back through Tailscale, it remains STANDALONE. Windows may implement the same physical-presence authority with platform-appropriate interface/route inspection rather than copying Android socket mechanics.
 
 There is no separate local music session inside the house. One active output simply means the shared house session currently has one renderer; powering up another output makes it join the same song at the current timestamp.
 
@@ -140,3 +140,16 @@ Server v0.8.1 is now installed on the permanent Pi. A service restart performed 
 The server snapshot reported `startup.ready: true`, `lastAction: started_default_session`, one passive/audible renderer, zero controllers, and the persisted `Rap` default. This confirms the shared restart contract future Windows HOUSE mode should follow: reconnect with fresh controller state and never attempt to resurrect the pre-restart session.
 
 Physical controller pause/resume/expiry transitions remain pending server acceptance tests.
+
+
+### Android v0.4.0 integration finding relevant to Windows
+
+The permanent Pi is now running server v0.8.2. The first Android HOUSE field pass exposed an important cross-client distinction:
+
+- physical non-VPN LAN presence decides whether a client is HOUSE;
+- ordinary HOUSE traffic can use normal platform routing;
+- VPN reachability by itself never proves the client is home.
+
+On Android, binding all HOUSE traffic to the physical network broke updates when Tailscale was enabled even though the Pi remained reachable through normal routing. Future Windows HOUSE code should preserve the **authority rule** without assuming the same interface-binding implementation.
+
+The Android-specific playlist-mute and mute-button-placement corrections do not impose a Windows UI requirement.
