@@ -67,6 +67,8 @@ The cross-project authority rule remains simple: HOUSE requires evidence that th
 
 There is no separate local music session inside the house. One active output simply means the shared house session currently has one renderer; powering up another output makes it join the same song at the current timestamp.
 
+The shared session/output contract is maintained in [house-audio-server/docs/SESSION_BEHAVIOR.md](https://github.com/oolah10293/house-audio-server/blob/main/docs/SESSION_BEHAVIOR.md). Its 2026-09-30 clarification keeps transport commands separate from local renderer eligibility. Android's Bluetooth requirement and SMB Bluetooth lifecycle are phone-specific; they do not impose Bluetooth-only rendering or new standalone behavior on this Windows player.
+
 The existing folder-first UI remains authoritative as a control model: **folders are playlists**.
 
 Related projects:
